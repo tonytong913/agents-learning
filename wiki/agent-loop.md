@@ -1,6 +1,6 @@
 # Agent Loop 设计
 
-> 状态：🟡 进行中 | 最后更新：2026-05-06
+> 状态：🟢 完成 | 最后更新：2026-05-06
 > 相关源文件：`src/query.ts`, `src/QueryEngine.ts`, `src/utils/attachments.ts`, `src/utils/messageQueueManager.ts`, `src/services/tools/StreamingToolExecutor.ts`, `src/services/tools/toolOrchestration.ts`
 
 ## 1. 架构概览
@@ -434,7 +434,122 @@ if (pendingMemoryPrefetch?.settledAt !== null &&  // 已完成
 
 **How — 注入点③：skill discovery**
 
-> 💡 待学习 — 本次未展开讨论
+Skill discovery 是一套与 memory prefetch 同构的异步预取系统，目标是从 200+ 用户/项目/插件技能中，按上下文动态发现当前对话可能需要的技能。
+
+技能呈现分两套机制共存：
+
+| | skill_listing | skill_discovery |
+|---|---|---|
+| **触发方式** | `getAttachmentMessages` 每轮附带 | 异步 prefetch（迭代开始启动，post-tools 消费） |
+| **内容** | 全量可用技能列表（initial + delta） | 上下文相关的动态发现结果 |
+| **来源** | `getSkillToolCommands()` + `getMcpSkillCommands()` | AKI 模型查询 |
+| **Feature gate** | 无，但 skill-search 启用后缩减为 bundled+MCP | `EXPERIMENTAL_SKILL_SEARCH` |
+| **格式** | `type: 'skill_listing'`，纯文本 content | `type: 'skill_discovery'`，结构化 `{name, description, shortId}[]` |
+
+**启动——每轮迭代开始**
+
+位置：`query.ts:331-335`
+
+```typescript
+const pendingSkillPrefetch = skillPrefetch?.startSkillDiscoveryPrefetch(
+  null,          // null = 主线程，发送 'assistant_turn' signal
+  messages,      // 当前对话消息
+  toolUseContext,
+)
+```
+
+与 LLM API 调用、工具执行**并发运行**，不阻塞主循环。`findWritePivot` 守卫使非写操作迭代直接返回空——只在对代码有修改意图时才做发现。
+
+**消费——工具执行后**
+
+位置：`query.ts:1617-1628`
+
+```typescript
+if (skillPrefetch && pendingSkillPrefetch) {
+  const skillAttachments =
+    await skillPrefetch.collectSkillDiscoveryPrefetch(pendingSkillPrefetch)
+  for (const att of skillAttachments) {
+    const msg = createAttachmentMessage(att)
+    yield msg
+    toolResults.push(msg)
+  }
+}
+```
+
+`collectSkillDiscoveryPrefetch` 返回的附件格式：
+
+```typescript
+{
+  type: 'skill_discovery'
+  skills: { name: string; description: string; shortId?: string }[]
+  signal: DiscoverySignal              // 'assistant_turn' | 'subagent_spawn' 等
+  source: 'native' | 'aki' | 'both'   // 来源
+}
+```
+
+性能：>98% 的情况下 prefetch 在消费点之前已解析完成（AKI 缓存命中 ~250ms vs turn 时长 2-30s）。`hidden_by_main_turn: true` 标记命中的 prefetch（用于遥测）。
+
+**Turn-0：阻塞路径**
+
+首轮用户输入没有并行工作可重叠，因此 turn-0 走**同步阻塞**的 `getTurnZeroSkillDiscovery`：
+
+```typescript
+// attachments.ts:801-813
+...(feature('EXPERIMENTAL_SKILL_SEARCH') &&
+  skillSearchModules &&
+  !options?.skipSkillDiscovery    // ← 防止 SKILL.md 展开内容误触发
+  ? [
+      maybe('skill_discovery', () =>
+        skillSearchModules.prefetch.getTurnZeroSkillDiscovery(
+          input, messages, context,
+        ),
+      ),
+    ]
+  : [])
+```
+
+`skipSkillDiscovery` guard 的来源：当用户调用 `/commit` 等 skill 时，`getMessagesForPromptSlashCommand` 会将 SKILL.md 展开后作为 `input` 传入 `getAttachmentMessages`。如果不加 guard，110KB 的 SKILL.md 会被当作"用户意图"触发 discovery，每次 ~3.3s 的 AKI 查询（session 13a9afae）。
+
+**skill_listing 的退让策略**
+
+当 skill-search 启用时，`skill_listing` 从全量退化为只发 **bundled（内置精选）+ MCP（用户连接的服务器）**：
+
+```typescript
+// attachments.ts:2688-2693
+if (skillSearchModules?.featureCheck.isSkillSearchEnabled()) {
+  allCommands = filterToBundledAndMcp(allCommands)
+  // 若 bundled+mcp > 30 → 回退到 only bundled
+}
+```
+
+设计意图：bundled + MCP 数量少（通常是可控的）、来源可信，直接告诉模型即可。用户/项目/插件技能（长尾，200+）走 discovery 按需匹配。
+
+**Subagent 差异**
+
+Subagent 不走 turn-0 阻塞路径，`startSkillDiscoveryPrefetch` 用 `subagent_spawn` signal 代替 `assistant_turn`。结果是 subagent 第一轮看不到 discovery 结果（"visible turn 1"），只能靠 `skill_listing`（bundled+MCP）做初始决策。
+
+**Feature gate 与公开仓库的 stub**
+
+所有 skill search 真实现实在 ant-internal 仓库。公开仓库中 `services/skillSearch/*.ts` 是 Proxy 构成的万能 stub——任何属性访问和函数调用都返回另一个空 Proxy，不崩溃也不执行实际逻辑。DCE 后这些代码路径完全不存在于外部 bundle。
+
+条件 require 确保 `'skill_discovery'` 字符串和其它 skill-search 相关字面量不会泄漏到外部 build：
+
+```typescript
+// query.ts:66-68
+const skillPrefetch = feature('EXPERIMENTAL_SKILL_SEARCH')
+  ? (require('./services/skillSearch/prefetch.js') as typeof import(...))
+  : null  // ← 外部 build 走这条，整个模块被 DCE
+```
+
+**三层注入点的次序**
+
+```
+注入点① getAttachmentMessages()     ← 命令排水 + 附件（含 skill_listing）
+注入点② pendingMemoryPrefetch 消费    ← 相关记忆文件注入
+注入点③ collectSkillDiscoveryPrefetch ← 动态发现的技能注入
+```
+
+次序无关 dependency（三个注入互不依赖彼此的输出），但 ③ 放最后是延迟最大化——给 prefetch 最多的完成时间。
 
 ### 6.6 阶段3 收尾：消息组装 → continue
 
@@ -492,7 +607,7 @@ continue  // → 回到 while(true) 顶部，下一轮调 API
 - [x] `runTools()` 的并发/串行策略
 - [x] 阶段2-3 之间：附件收集（getAttachmentMessages + 命令优先级系统）
 - [x] 阶段2-3 之间：memory prefetch（异步预取 + using + 双层去重）
-- [ ] 阶段2-3 之间：skill discovery 注入
+- [x] 阶段2-3 之间：skill discovery 注入
 - [x] AutoCompact 的完整触发和恢复流程
 - [x] Context Collapse 的实现细节
 

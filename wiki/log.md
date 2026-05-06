@@ -4,6 +4,25 @@
 
 ---
 
+## [2026-05-06] query | skill discovery 注入精读
+
+**范围**：`src/query.ts`（启动 + 消费点）、`src/utils/attachments.ts`（turn-0 阻塞路径 + skill_listing 退让 + skipSkillDiscovery guard）、`src/services/skillSearch/`（stub 机制）、`src/tools/SkillTool/SkillTool.ts`（调用链路）
+
+**讨论内容**：
+
+1. **skilling_listing vs skill_discovery**：两套并存机制的分工 — listing 提供全量概览（bundled+MCP），discovery 做上下文相关匹配（用户/项目/插件 200+）
+2. **异步 prefetch 架构**：startSkillDiscoveryPrefetch 在迭代开始启动，与 LLM + 工具执行并行，post-tools 消费，>98% 命中率（AKI 250ms vs turn 2-30s）
+3. **Turn-0 阻塞路径**：首轮无并行工作可重叠，getTurnZeroSkillDiscovery 在 userInputAttachments 中同步调用
+4. **skipSkillDiscovery guard**：SKILL.md 展开内容（110KB+）误触发 ~3.3s 查询的防御（session 13a9afae）
+5. **skill_listing delta 机制**：Map<agentKey, Set> 跟踪已发送技能，后续只发增量
+6. **Feature gate + DCE**：条件 require + Proxy stub + import type 确保外部 build 零泄漏
+7. **Subagent 差异**：subagent_spawn signal，第一轮无 discovery（visible turn 1）
+8. **三层注入次序**：getAttachmentMessages → memory prefetch → skill discovery（延迟最大化）
+
+**产出**：更新 agent-loop.md §6.5（注入点③：skill discovery 完整分析），agent-loop 待学习全部完成
+
+---
+
 ## [2026-05-05] wiki | 合并双项目学习
 
 - 将 learning 文件夹移至 `~/Documents/`，重命名为 `agents-learning`

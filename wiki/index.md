@@ -16,7 +16,7 @@
 
 | 页面 | 状态 | 说明 |
 |------|------|------|
-| [agent-loop.md](agent-loop.md) | 🟡 进行中 | Agent Loop 设计 — query()/queryLoop()、循环终止条件、工具执行三阶段、附件注入与记忆预取 |
+| [agent-loop.md](agent-loop.md) | 🟢 完成 | Agent Loop 设计 — query()/queryLoop()、循环终止条件、工具执行三阶段、附件注入与记忆预取 |
 | tool-calling.md | ⬜ 待开始 | Tool Calling / Function Calling — Tool 系统架构、Zod Schema、权限控制 |
 | prompt-engineering.md | ⬜ 待开始 | Prompt Engineering — System Prompt、Memory、自定义 Prompt |
 | context-management.md | 🟡 进行中 | 上下文管理与 Token 优化 — AutoCompact、MicroCompact、Session Memory Compact、附件注入 |
