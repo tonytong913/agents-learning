@@ -1,0 +1,1 @@
+- [feedback-learning-style](feedback-learning-style.md) — Learning must be dialog-based: discuss first, write notes after. Don't pre-synthesize.

@@ -20,6 +20,42 @@
 
 ---
 
+## [2026-05-06] query | agent-loop 阶段2-3 注入点精读
+
+**范围**：`src/query.ts` (阶段 2-3 注入段)、`src/utils/attachments.ts` (getAttachmentMessages / getAttachments / startRelevantMemoryPrefetch)、`src/utils/messageQueueManager.ts` (命令优先级)
+
+**讨论内容**：
+
+1. **getAttachmentMessages**：两阶段并行附件生成（userInputAttachments → allThreadAttachments），`maybe()` 独立容错包装，命令队列排水（queuedCommandsSnapshot 的 sleep 分支）
+2. **命令优先级系统**：`now/next/later` 三级，`enqueue()`(next) vs `enqueuePendingNotification()`(later)，设计意图是防止系统通知饥饿用户输入
+3. **memory prefetch**：启动在循环外 (输入不变)、消费在循环内 (非阻塞 poll + readFileState 累积去重)，`using` + `Symbol.dispose` 自动清理，两层去重 (readFileState vs alreadySurfaced，compact 为重置点)
+4. **Turn vs 迭代**：Turn = 一次 query() 调用，迭代 = while(true) 每圈，一个 turn 可含多轮迭代
+
+**产出**：更新 agent-loop.md §6.5-6.6（注入点 + 消息组装）
+
+**待继续**：skill discovery 注入
+
+---
+
+## [2026-05-06] query | 上下文管理与 Token 优化
+
+**范围**：`src/services/compact/` 全部、`src/query.ts` 阶段 2-3 附件注入段
+
+**讨论内容**：
+
+1. **AutoCompact 触发与断路器**：有效窗口计算（context window - max_output - 13k buffer），shouldAutoCompact 的 5 层拒绝条件，3 次连续失败断路器
+2. **Session Memory Compact**：零 LLM 成本的裁剪方案，calculateMessagesToKeepIndex 的 minTokens/minTextBlockMessages/maxTokens 三级约束
+3. **MicroCompact 两种路径**：Cached MC（cache_edits 不破坏缓存前缀）vs Time-Based MC（缓存已冷时直接替换）
+4. **迭代入口四级压缩管道**：toolResultBudget → snipCompact → microCompact → contextCollapse → autoCompact
+5. **阶段 2-3 附件注入**：getAttachmentMessages（命令 → 附件）、memory prefetch 消费（non-blocking + readFileState 去重）、skill discovery 注入（并行预取 >98% 命中率）
+6. **Context Collapse / Reactive Compact**：内部功能（外部 build 为 stub），collapse 的 90% commit / 95% blocking-spawn 两阶段设计
+
+**产出**：context-management.md — 核心笔记
+
+**待继续**：OpenClaw compaction.ts / context-engine/ 对照
+
+---
+
 ## [2026-05-05] query | needsFollowUp = true 分支精读
 
 **范围**：`src/query.ts` 工具执行段、`src/services/tools/StreamingToolExecutor.ts`、`src/services/tools/toolOrchestration.ts`

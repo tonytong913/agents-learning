@@ -16,10 +16,10 @@
 
 | 页面 | 状态 | 说明 |
 |------|------|------|
-| [agent-loop.md](agent-loop.md) | 🟡 进行中 | Agent Loop 设计 — query()/queryLoop()、循环终止条件、工具执行分支、错误恢复 |
+| [agent-loop.md](agent-loop.md) | 🟡 进行中 | Agent Loop 设计 — query()/queryLoop()、循环终止条件、工具执行三阶段、附件注入与记忆预取 |
 | tool-calling.md | ⬜ 待开始 | Tool Calling / Function Calling — Tool 系统架构、Zod Schema、权限控制 |
 | prompt-engineering.md | ⬜ 待开始 | Prompt Engineering — System Prompt、Memory、自定义 Prompt |
-| context-management.md | ⬜ 待开始 | 上下文管理 — AutoCompact、MicroCompact、Context Collapse、Snip |
+| context-management.md | 🟡 进行中 | 上下文管理与 Token 优化 — AutoCompact、MicroCompact、Session Memory Compact、附件注入 |
 | mcp-integration.md | ⬜ 待开始 | MCP 协议集成 — Client/Server、Tool 代理、连接管理 |
 | multi-agent.md | ⬜ 待开始 | Multi-Agent — AgentTool、Coordinator、forkedAgent |
 | permissions.md | ⬜ 待开始 | 权限系统 — Permission Mode、Tool Permission、hook 拦截 |

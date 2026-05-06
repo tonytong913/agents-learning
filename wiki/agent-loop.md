@@ -1,7 +1,7 @@
 # Agent Loop 设计
 
-> 状态：🟡 进行中 | 最后更新：2026-05-05
-> 相关源文件：`src/query.ts`, `src/QueryEngine.ts`, `src/services/tools/StreamingToolExecutor.ts`, `src/services/tools/toolOrchestration.ts`
+> 状态：🟡 进行中 | 最后更新：2026-05-06
+> 相关源文件：`src/query.ts`, `src/QueryEngine.ts`, `src/utils/attachments.ts`, `src/utils/messageQueueManager.ts`, `src/services/tools/StreamingToolExecutor.ts`, `src/services/tools/toolOrchestration.ts`
 
 ## 1. 架构概览
 
@@ -323,14 +323,127 @@ async function* runToolsSerially(blocks, ...):
 | Concurrency-safe | 非 safe 工具会阻塞队列 | 独立 partition，互不阻塞 |
 | 使用条件 | `config.gates.streamingToolExecution === true` | 兜底路径 |
 
-### 6.5 阶段3：消息组装 → continue
+### 6.5 阶段3：注入 + 消息组装 → continue
+
+阶段3 不是简单的数组拼接。工具执行完毕后、组装下一轮 State 之前，有三个信息注入点——向模型"汇报"工具执行期间外部世界发生的变化。
+
+**Why：** system prompt 在 turn 开始时已固定，但 Agent 执行工具期间外部世界在变化——用户发了新消息、后台任务完成了、文件被修改了。这些新信息如果不注入，模型就活在过时的世界观里。注入点的设计目标是：**让模型在下一轮思考前，先看到这些运行时新事件**。
+
+**What：** 三个注入点依次执行，产生 attachment 消息 push 到 `toolResults` 数组：
+
+```
+工具执行完毕 (toolResults 已收集)
+  │
+  ├── 注入点① getAttachmentMessages()    ← 队列排水 + 15-20 种附件的两阶段并行生成
+  ├── 注入点② pendingMemoryPrefetch       ← 异步预取的记忆文件消费
+  ├── 注入点③ skillPrefetch               ← 并行预取的技能发现注入
+  │
+  ▼
+  组装 next State { messages: [...old, ...assistant, ...toolResults] }
+  → continue
+```
+
+注入的 attachment 消息被 push 到 `toolResults`，格式是 `user` 消息，下一轮模型看到时就像"用户在工具执行期间穿插告诉你的新信息"。
+
+**How — 注入点①：getAttachmentMessages**
+
+位置：`src/utils/attachments.ts:2933` → `getAttachments()` (第 743 行)
+
+两阶段并行架构：
+
+```
+阶段1: userInputAttachments (仅 input !== null，即首轮用户输入)
+  ├── @mentioned files    — @文件引用
+  ├── MCP resources       — MCP 资源
+  ├── agent mentions      — @agent 引用
+  └── skill discovery     — 首轮 skill 发现（非 inter-turn）
+  ⇒ await Promise.all() ← 先完成
+
+阶段2: allThreadAttachments (每轮迭代都跑)
+  ├── queued_commands      — 命令队列排水
+  ├── date_change          — 日期变化提醒
+  ├── deferred_tools_delta — 延迟工具 schema 增量
+  ├── agent_listing_delta  — agent 列表变化
+  ├── mcp_instructions_delta — MCP 指令变化
+  ├── changed_files        — 文件变更检测
+  ├── nested_memory        — 嵌套记忆文件
+  ├── skill_listing        — 可用 skill 列表
+  ├── plan_mode            — Plan 模式提示
+  ├── todo_reminders       — TODO 提醒
+  └── ... 更多 feature gated 项
+  ⇒ await Promise.all() ← 15-20 个任务并行
+```
+
+阶段 2 必须在阶段 1 之后执行——`nested_memory` 依赖 `at_mentioned_files` 填充的 `nestedMemoryAttachmentTriggers`。
+
+每个 `maybe()` 是独立容错包装器：成功返回结果，失败返回 `[]`，不拖垮其他附件生成。
+
+**命令优先级系统**（注入点①的子话题）
+
+位置：`src/utils/messageQueueManager.ts`
+
+```
+PRIORITY_ORDER = { now: 0, next: 1, later: 2 }
+```
+
+| 函数 | 默认优先级 | 调用场景 |
+|------|-----------|---------|
+| `enqueue()` | `next` | 用户命令（prompt、bash），不被打断 |
+| `enqueuePendingNotification()` | `later` | 系统通知（tick、cron、task completion），防止饥饿用户输入 |
+
+queryLoop 取命令时：正常迭代取 `'next'`（不含 `later`），Agent 执行了 Sleep 工具后取 `'later'`（全部清空）。Sleep 是自主模式（Proactive）的标志——Agent 声明自己空闲，趁机处理低优先级积压。
+
+**How — 注入点②：memory prefetch**
+
+位置：`src/utils/attachments.ts:2357` (启动), `src/query.ts:1599` (消费)
+
+启动一次，消费一次。设计核心：用户输入在整个 turn 不变，不需要每轮重新搜索。
+
+```typescript
+// query() 入口，while 循环外 —— 启动一次
+using pendingMemoryPrefetch = startRelevantMemoryPrefetch(state.messages, state.toolUseContext)
+
+// 守卫条件（4 个 early return 跳过搜索）:
+// 1. AutoMemory 未启用
+// 2. 没有真实用户消息（只剩 isMeta 系统注入）
+// 3. 单字 prompt（无空白字符，无法提取搜索词）
+// 4. 会话已注入 memory 超过 MAX_SESSION_BYTES
+
+// while 循环内，工具执行后 —— 非阻塞消费
+if (pendingMemoryPrefetch?.settledAt !== null &&  // 已完成
+    pendingMemoryPrefetch?.consumedOnIteration === -1) {  // 未消费
+  const memoryAttachments = filterDuplicateMemoryAttachments(
+    await pendingMemoryPrefetch.promise,
+    toolUseContext.readFileState,  // 去重：已读/已注入的文件
+  )
+  // push 到 toolResults
+  pendingMemoryPrefetch.consumedOnIteration = turnCount - 1
+}
+```
+
+两层去重：
+
+| 机制 | 作用域 | 重置条件 |
+|------|--------|----------|
+| `readFileState` | 整个 session（跨 turn） | 不重置 |
+| `alreadySurfaced` | 当前 messages 窗口 | compact 后自动清空 |
+
+复用 `readFileState`（FileReadTool 也写入）实现双重目的——模型读了文件后不再注入该文件的 memory，上一轮已注入过的也不再重复。
+
+`using` 确保 Generator 退出（return/throw/break/用户取消）时 `[Symbol.dispose]()` 自动调用，中止进行中的搜索并写遥测。
+
+**How — 注入点③：skill discovery**
+
+> 💡 待学习 — 本次未展开讨论
+
+### 6.6 阶段3 收尾：消息组装 → continue
 
 ```typescript
 const next: State = {
   messages: [
     ...messagesForQuery,      // 本轮开始时的消息
     ...assistantMessages,     // 模型返回 (含 tool_use)
-    ...toolResults,           // 工具结果 (user 消息，含 tool_result)
+    ...toolResults,           // 工具结果 + 注入的附件消息
   ],
   toolUseContext: updatedToolUseContext,
   turnCount: nextTurnCount,
@@ -347,10 +460,12 @@ continue  // → 回到 while(true) 顶部，下一轮调 API
  assistant("我来读取文件" + tool_use: Read),
  assistant(tool_use: Bash),
  user(tool_result: Read结果),
- user(tool_result: Bash结果)]
+ user(tool_result: Bash结果),
+ user(attachment: relevant_memories),   ← 注入点产生的 attachment
+ user(attachment: queued_command)]      ← 也混在 toolResults 里
 ```
 
-### 6.6 工具执行期间的中断处理
+### 6.7 工具执行期间的中断处理
 
 | 条件 | 行为 | reason |
 |------|------|--------|
@@ -375,15 +490,19 @@ continue  // → 回到 while(true) 顶部，下一轮调 API
 - [x] `queryLoop` 中 `needsFollowUp = true` 分支的完整流程（工具执行、附件收集、memory prefetch）
 - [x] `StreamingToolExecutor` 的工作机制
 - [x] `runTools()` 的并发/串行策略
-- [ ] 阶段2-3 之间：附件收集（getAttachmentMessages）、memory prefetch 消费、skill discovery 注入
-- [ ] AutoCompact 的完整触发和恢复流程
-- [ ] Context Collapse 的实现细节
+- [x] 阶段2-3 之间：附件收集（getAttachmentMessages + 命令优先级系统）
+- [x] 阶段2-3 之间：memory prefetch（异步预取 + using + 双层去重）
+- [ ] 阶段2-3 之间：skill discovery 注入
+- [x] AutoCompact 的完整触发和恢复流程
+- [x] Context Collapse 的实现细节
 
 ## 参考
 
 - [cc-haha-learning-path.md §1](../raw/cc-haha-learning-path.md#1-agent-loop-设计)
 - `src/query.ts` — query() 和 queryLoop()
 - `src/QueryEngine.ts` — QueryEngine.processUserInput()
+- `src/utils/attachments.ts` — getAttachmentMessages() / startRelevantMemoryPrefetch()
+- `src/utils/messageQueueManager.ts` — enqueue() / enqueuePendingNotification() / PRIORITY_ORDER
 - `src/services/tools/StreamingToolExecutor.ts` — 边流边执行工具
 - `src/services/tools/toolOrchestration.ts` — runTools / runToolsConcurrently / runToolsSerially
 - `src/utils/queryHelpers.ts` — isResultSuccessful()
