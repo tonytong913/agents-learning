@@ -1,7 +1,7 @@
 # Tool Calling / Function Calling
 
 > 状态：🟡 进行中 | 最后更新：2026-05-08
-> 相关源文件（cc-haha）：`src/Tool.ts`, `src/tools.ts`, `src/utils/api.ts`, `src/query.ts`, `src/services/tools/toolOrchestration.ts`, `src/services/tools/toolExecution.ts`, `src/tools/GlobTool/GlobTool.ts`, `src/tools/GlobTool/prompt.ts`
+> 相关源文件（cc-haha）：`src/Tool.ts`, `src/tools.ts`, `src/utils/api.ts`, `src/query.ts`, `src/services/api/claude.ts`, `src/services/tools/toolOrchestration.ts`, `src/services/tools/toolExecution.ts`, `src/tools/GlobTool/GlobTool.ts`, `src/tools/GlobTool/prompt.ts`, `src/tools/ToolSearchTool/ToolSearchTool.ts`, `src/tools/ToolSearchTool/prompt.ts`, `src/utils/toolSearch.ts`, `src/utils/attachments.ts`
 
 ## 1. 核心链路
 
@@ -285,14 +285,197 @@ src/tools/GlobTool/GlobTool.ts
 
 这说明 cc-haha 的工具系统不是按工具名粗暴分类，而是鼓励工具根据输入内容返回安全属性。
 
-## 6. 待继续
+## 6. 渐进式工具加载
+
+工具数量很多时，cc-haha 不会把所有工具的完整 schema 一次性发给模型。它采用 `ToolSearchTool + defer_loading + tool_reference`：核心工具直接发送完整 schema，延迟工具先只公布名称，模型需要时再通过 `ToolSearchTool` 取回 schema。
+
+```text
+系统决定哪些工具可 defer
+  -> 模型看到核心工具 schema + deferred 工具名列表
+  -> 模型调用 ToolSearchTool(select:xxx 或关键词)
+  -> ToolSearchTool 返回 tool_reference
+  -> 下一轮 API 扫描历史中的 tool_reference
+  -> filteredTools 包含已发现的 deferred tool
+  -> toolToAPISchema() 发送完整 schema
+```
+
+### 6.1 哪些工具会 defer
+
+入口是 `src/tools/ToolSearchTool/prompt.ts` 的 `isDeferredTool(tool)`：
+
+| 条件 | 行为 | 原因 |
+|------|------|------|
+| `tool.alwaysLoad === true` | 不 defer | 工具必须首轮可见 |
+| `tool.isMcp === true` | defer | MCP 工具动态且数量可能很大 |
+| `tool.name === ToolSearchTool` | 不 defer | 搜索工具必须先可用 |
+| 特定核心通信/Agent 工具 | 不 defer | 模型首轮需要看到完整行为契约 |
+| `tool.shouldDefer === true` | defer | 工具作者显式声明可延迟 |
+
+注意：defer 的不是本地工具实现，而是“是否把完整参数 schema 发给模型”。工具代码始终在本地工具集合里。
+
+### 6.2 ToolSearch 是否启用
+
+`isToolSearchEnabled()` 是请求级最终判断，包含：
+
+| 检查 | 说明 |
+|------|------|
+| 模型支持 | 不支持 `tool_reference` 的模型禁用，例如 Haiku 类模式 |
+| 工具可用 | `ToolSearchTool` 必须在当前 tools 列表里，不能被 disallowedTools 移除 |
+| 模式 | `ENABLE_TOOL_SEARCH` 控制 `tst` / `tst-auto` / `standard` |
+| auto 阈值 | `auto` 模式下，deferred tool schema 超过上下文窗口一定比例才启用 |
+
+`ENABLE_TOOL_SEARCH` 模式：
+
+| 配置 | 模式 | 行为 |
+|------|------|------|
+| unset | `tst` | 默认启用 |
+| `true` | `tst` | 强制启用 |
+| `auto` / `auto:N` | `tst-auto` | deferred schema 超过上下文 N% 才启用 |
+| `false` / `auto:100` | `standard` | 禁用渐进式加载 |
+
+auto 模式先用 token counting 估算 deferred tool schema 成本；失败时退回字符数启发式。默认阈值是上下文窗口的 10%。
+
+### 6.3 第一轮模型看到什么
+
+`src/services/api/claude.ts` 构造 `filteredTools`：
+
+```typescript
+filteredTools = tools.filter(tool => {
+  if (!deferredToolNames.has(tool.name)) return true
+  if (toolMatchesName(tool, TOOL_SEARCH_TOOL_NAME)) return true
+  return discoveredToolNames.has(tool.name)
+})
+```
+
+含义：
+
+| 工具 | 是否发送完整 schema |
+|------|----------------------|
+| 非 deferred tool | 是 |
+| `ToolSearchTool` | 是 |
+| 已发现的 deferred tool | 是 |
+| 未发现的 deferred tool | 否 |
+
+未发现的 deferred tool 仍会以“名称列表”形式告诉模型。旧路径在请求前插入：
+
+```xml
+<available-deferred-tools>
+mcp__github__create_issue
+mcp__slack__send_message
+</available-deferred-tools>
+```
+
+新路径使用 `deferred_tools_delta` attachment，渲染为 system reminder：
+
+```text
+The following deferred tools are now available via ToolSearch:
+mcp__github__create_issue
+mcp__slack__send_message
+```
+
+delta 机制会扫描之前已经宣布过的 deferred tools，只发送新增/移除变化，避免工具池变化频繁打破缓存。
+
+### 6.4 怎么知道加载什么
+
+加载什么由模型发起，但搜索由本地确定性算法完成。模型先看到 deferred 工具名和 `ToolSearchTool` 的 prompt，然后根据任务选择：
+
+```json
+{ "query": "select:mcp__slack__send_message" }
+```
+
+或：
+
+```json
+{ "query": "slack send", "max_results": 5 }
+```
+
+`ToolSearchTool` 支持两种查询：
+
+| 查询形式 | 行为 |
+|----------|------|
+| `select:A,B,C` | 精确选择一个或多个工具名 |
+| 关键词 | 对 deferred 工具名、`searchHint`、prompt/description 打分 |
+
+关键词打分逻辑：
+
+| 信号 | 分值 |
+|------|------|
+| 工具名 part 精确匹配 | MCP 12 / 普通 10 |
+| 工具名 part 包含匹配 | MCP 6 / 普通 5 |
+| `searchHint` 匹配 | 4 |
+| full name fallback | 3 |
+| prompt/description 匹配 | 2 |
+
+MCP 工具名会按 server/action 拆分：
+
+```text
+mcp__slack__send_message
+  -> slack, send, message
+```
+
+普通工具名按 CamelCase 和下划线拆分：
+
+```text
+NotebookEdit
+  -> notebook, edit
+```
+
+因此 query `"slack send"` 会自然匹配 `mcp__slack__send_message`。
+
+### 6.5 tool_reference 如何让下一轮加载 schema
+
+`ToolSearchTool.mapToolResultToToolResultBlockParam()` 找到匹配时返回 `tool_reference`：
+
+```json
+{
+  "type": "tool_result",
+  "tool_use_id": "toolu_xxx",
+  "content": [
+    {
+      "type": "tool_reference",
+      "tool_name": "mcp__slack__send_message"
+    }
+  ]
+}
+```
+
+下一轮 API 请求前，`extractDiscoveredToolNames(messages)` 扫描历史 user message 的 `tool_result.content[]`，收集所有 `tool_reference.tool_name`。`claude.ts` 再把这些名字视为 `discoveredToolNames`，允许它们进入 `filteredTools`，于是 `toolToAPISchema()` 才会发送完整 schema。
+
+```text
+Turn N:
+  ToolSearchTool("slack send")
+  -> tool_result: tool_reference(mcp__slack__send_message)
+
+Turn N+1:
+  extractDiscoveredToolNames()
+  -> filteredTools includes mcp__slack__send_message
+  -> API tools includes full schema
+  -> 模型正式调用 mcp__slack__send_message
+```
+
+### 6.6 兜底与 compact
+
+如果模型知道 deferred 工具名却没有先加载 schema，typed 参数很容易生成错误。`buildSchemaNotSentHint()` 会在 Zod 校验失败时追加提示：
+
+```text
+Load the tool first: call ToolSearch with query "select:<tool.name>", then retry this call.
+```
+
+Compact 会删除含 `tool_reference` 的原始消息。为了不丢失“已经加载过哪些 deferred tools”，compact boundary 会保存：
+
+```typescript
+boundaryMarker.compactMetadata.preCompactDiscoveredTools = [...]
+```
+
+`extractDiscoveredToolNames()` 后续会从 compact boundary 读回这些工具名，避免 compact 后重复丢 schema。
+
+## 7. 待继续
 
 - `BashTool` 高风险路径：沙箱、权限规则、危险命令分类、后台任务
-- `ToolSearchTool` / `defer_loading`：动态工具加载如何降低 token 开销
 - `SyntheticOutputTool`：用 Tool-as-Schema 实现结构化输出
 - Fine-grained tool streaming：工具参数流式传输与提前执行
 
-## 7. 相关章节
+## 8. 相关章节
 
 - [Agent Loop 设计](agent-loop.md)
 - [Context Management](context-management.md)

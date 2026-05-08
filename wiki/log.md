@@ -141,3 +141,23 @@
 **产出**：新增 `wiki/tool-calling.md`，更新 `wiki/index.md` 中 Tool Calling 状态为进行中
 
 **待继续**：BashTool 高风险路径、ToolSearchTool / defer_loading、SyntheticOutputTool 结构化输出
+
+---
+
+## [2026-05-08] query | ToolSearchTool 渐进式加载精读
+
+**范围**：`src/tools/ToolSearchTool/ToolSearchTool.ts`, `src/tools/ToolSearchTool/prompt.ts`, `src/utils/toolSearch.ts`, `src/services/api/claude.ts`, `src/utils/attachments.ts`, `src/utils/messages.ts`, `src/services/tools/toolExecution.ts`, `src/services/compact/compact.ts`
+
+**讨论内容**：
+
+1. **deferred 工具判定**：MCP tools 与 `shouldDefer=true` 工具延迟发送 schema，`alwaysLoad=true`、`ToolSearchTool` 和首轮关键工具保持直接加载
+2. **ToolSearch 启用条件**：模型 `tool_reference` 支持、`ToolSearchTool` 可用性、`ENABLE_TOOL_SEARCH` 模式、auto 阈值共同决定是否启用
+3. **filteredTools 策略**：非 deferred 工具、`ToolSearchTool`、已 discovered 的 deferred 工具进入 API tools；未 discovered 的 deferred 工具只公布名字
+4. **工具名公告机制**：旧路径注入 `<available-deferred-tools>`，新路径使用 `deferred_tools_delta` attachment 只发送新增/移除变化
+5. **搜索算法**：`select:` 精确选择；关键词搜索基于工具名拆分、MCP server/action、`searchHint`、prompt/description 加权打分
+6. **tool_reference 闭环**：`ToolSearchTool` 返回 `tool_reference`，下一轮 `extractDiscoveredToolNames()` 扫描历史并触发完整 schema 加载
+7. **兜底与 compact**：`buildSchemaNotSentHint()` 指导模型先加载 schema；compact boundary 保存 `preCompactDiscoveredTools` 防止压缩后丢失已加载状态
+
+**产出**：更新 `wiki/tool-calling.md` §6（渐进式工具加载）
+
+**待继续**：BashTool 高风险路径、SyntheticOutputTool 结构化输出、Fine-grained tool streaming
