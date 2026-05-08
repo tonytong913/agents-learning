@@ -1,0 +1,299 @@
+# Tool Calling / Function Calling
+
+> 状态：🟡 进行中 | 最后更新：2026-05-08
+> 相关源文件（cc-haha）：`src/Tool.ts`, `src/tools.ts`, `src/utils/api.ts`, `src/query.ts`, `src/services/tools/toolOrchestration.ts`, `src/services/tools/toolExecution.ts`, `src/tools/GlobTool/GlobTool.ts`, `src/tools/GlobTool/prompt.ts`
+
+## 1. 核心链路
+
+cc-haha 的工具系统不是简单的函数调用封装，而是一套 Agent action runtime：Schema 约束模型输出，Permission 约束真实世界副作用，Concurrency 约束执行顺序，Result mapping 约束下一轮模型能看到什么。
+
+```text
+工具定义
+  -> getAllBaseTools() 注册
+  -> toolToAPISchema() 转成 Anthropic tool schema
+  -> 模型返回 tool_use
+  -> query.ts 进入工具执行阶段
+  -> runTools() 分批编排
+  -> runToolUse() 执行单个工具
+  -> mapToolResultToToolResultBlockParam()
+  -> user/tool_result 回到下一轮模型上下文
+```
+
+`Tool` 接口承担多类职责：
+
+| 类别 | 字段 / 方法 | 作用 |
+|------|-------------|------|
+| 模型可见 | `name`, `prompt()`, `inputSchema`, `inputJSONSchema`, `strict`, `shouldDefer` | 决定模型看到什么工具，以及参数 schema |
+| 执行 | `call()` | 真正执行工具动作 |
+| 安全 | `validateInput()`, `checkPermissions()`, `isReadOnly()`, `isConcurrencySafe()`, `isDestructive()` | 控制参数合法性、权限和并发策略 |
+| UI / transcript | `renderToolUseMessage()`, `renderToolResultMessage()`, `mapToolResultToToolResultBlockParam()` | 控制用户界面和模型可见结果 |
+| 编排 | `interruptBehavior()`, `maxResultSizeChars`, `requiresUserInteraction()` | 控制中断、大结果持久化和交互需求 |
+
+## 2. buildTool 的保守默认值
+
+所有工具通过 `buildTool()` 从 `ToolDef` 构造成完整 `Tool`。`ToolDef` 允许省略常见方法，`buildTool()` 用 `TOOL_DEFAULTS` 补齐。
+
+关键默认值偏保守：
+
+| 默认方法 | 默认行为 | 设计含义 |
+|----------|----------|----------|
+| `isEnabled()` | `true` | 工具默认可用 |
+| `isConcurrencySafe()` | `false` | 未明确声明安全时，不并发执行 |
+| `isReadOnly()` | `false` | 未明确声明只读时，按有副作用处理 |
+| `isDestructive()` | `false` | 破坏性操作需工具显式声明 |
+| `checkPermissions()` | allow | 工具特有权限默认放行，通用权限系统仍可介入 |
+| `toAutoClassifierInput()` | `''` | 默认不送入自动安全分类器 |
+
+这里最重要的是 `isConcurrencySafe=false` 和 `isReadOnly=false`：新工具作者如果忘记声明安全属性，系统会自动退回串行和非只读路径。
+
+## 3. GlobTool 生命周期
+
+### 3.1 定义
+
+`GlobTool` 是一个低风险但完整的工具样本。它定义在 `src/tools/GlobTool/GlobTool.ts`：
+
+```typescript
+export const GlobTool = buildTool({
+  name: GLOB_TOOL_NAME,
+  inputSchema,
+  outputSchema,
+  isConcurrencySafe() {
+    return true
+  },
+  isReadOnly() {
+    return true
+  },
+  validateInput() { ... },
+  checkPermissions() { ... },
+  call() { ... },
+  mapToolResultToToolResultBlockParam() { ... },
+})
+```
+
+输入 schema 是严格对象：
+
+```typescript
+{
+  pattern: string,
+  path?: string
+}
+```
+
+模型调用时通常生成：
+
+```json
+{
+  "pattern": "**/*.ts",
+  "path": "src"
+}
+```
+
+### 3.2 注册
+
+`GlobTool` 在 `src/tools.ts` 被 import，并通过 `getAllBaseTools()` 进入基础工具列表：
+
+```typescript
+...(hasEmbeddedSearchTools() ? [] : [GlobTool, GrepTool])
+```
+
+注意这里有环境条件：如果 Ant-native build 已经内嵌搜索工具，专用的 `GlobTool` / `GrepTool` 会被省略。
+
+### 3.3 转成 API schema
+
+发请求给模型前，`toolToAPISchema()` 把内部 `Tool` 转成 Anthropic API 的 tool schema：
+
+```text
+GlobTool.name        -> "Glob"
+GlobTool.prompt()    -> description
+GlobTool.inputSchema -> zodToJsonSchema(...) -> input_schema
+```
+
+`GlobTool` 的 prompt 来自 `src/tools/GlobTool/prompt.ts`，说明它适合按文件名 pattern 搜索：
+
+```text
+- Fast file pattern matching tool that works with any codebase size
+- Supports glob patterns like "**/*.js" or "src/**/*.ts"
+- Returns matching file paths sorted by modification time
+```
+
+模型看到的是工具 schema，不是 TypeScript 函数：
+
+```json
+{
+  "name": "Glob",
+  "description": "...",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "pattern": { "type": "string" },
+      "path": { "type": "string" }
+    },
+    "required": ["pattern"]
+  }
+}
+```
+
+### 3.4 模型产生 tool_use
+
+用户说“找出所有 .ts 文件”时，模型可能返回：
+
+```json
+{
+  "type": "tool_use",
+  "id": "toolu_xxx",
+  "name": "Glob",
+  "input": {
+    "pattern": "**/*.ts"
+  }
+}
+```
+
+`query.ts` 检测到 assistant message 中有 `tool_use` 后，进入工具执行阶段。
+
+### 3.5 runTools 编排
+
+`query.ts` 调用：
+
+```typescript
+runTools(toolUseBlocks, assistantMessages, canUseTool, toolUseContext)
+```
+
+`runTools()` 使用 `partitionToolCalls()` 分批。判断逻辑不是写死工具名，而是：
+
+```text
+tool.inputSchema.safeParse(toolUse.input)
+  -> tool.isConcurrencySafe(parsedInput.data)
+```
+
+`GlobTool.isConcurrencySafe()` 返回 `true`，所以连续多个 Glob/Grep/Read 这类安全工具可以并发执行。非并发安全工具会单独串行执行。
+
+### 3.6 runToolUse 执行单个 Glob
+
+单个 `Glob` 调用经过 `runToolUse()` / `checkPermissionsAndCallTool()`：
+
+```text
+findToolByName("Glob")
+  -> GlobTool.inputSchema.safeParse(input)
+  -> GlobTool.validateInput(input)
+  -> runPreToolUseHooks(...)
+  -> resolveHookPermissionDecision(...)
+  -> GlobTool.checkPermissions(...)
+  -> GlobTool.call(...)
+  -> GlobTool.mapToolResultToToolResultBlockParam(...)
+```
+
+这里有两层输入检查：
+
+| 阶段 | 作用 |
+|------|------|
+| `inputSchema.safeParse()` | 检查模型输出的类型结构，例如 `pattern` 必须是 string |
+| `validateInput()` | 检查业务语义，例如传入的 `path` 必须存在且是目录 |
+
+`GlobTool.validateInput()` 还专门处理路径不存在时的提示，包括当前工作目录说明和相近路径建议。
+
+### 3.7 call 真正执行搜索
+
+真正执行在 `GlobTool.call()`：
+
+```typescript
+const { files, truncated } = await glob(
+  input.pattern,
+  GlobTool.getPath(input),
+  { limit, offset: 0 },
+  abortController.signal,
+  appState.toolPermissionContext,
+)
+```
+
+关键行为：
+
+| 行为 | 说明 |
+|------|------|
+| 默认目录 | `path ? expandPath(path) : getCwd()` |
+| 默认上限 | `globLimits?.maxResults ?? 100` |
+| 权限上下文 | `appState.toolPermissionContext` 传入底层 glob |
+| token 优化 | `files.map(toRelativePath)`，把 cwd 下路径转成相对路径 |
+
+内部输出结构：
+
+```typescript
+{
+  filenames,
+  durationMs,
+  numFiles,
+  truncated
+}
+```
+
+### 3.8 映射成 tool_result
+
+`call()` 返回的是内部结构化数据，还要通过 `mapToolResultToToolResultBlockParam()` 转成模型可见结果。
+
+没有匹配文件：
+
+```text
+No files found
+```
+
+有匹配文件：
+
+```text
+src/query.ts
+src/Tool.ts
+src/tools/GlobTool/GlobTool.ts
+```
+
+如果结果被截断，会追加提醒：
+
+```text
+(Results are truncated. Consider using a more specific path or pattern.)
+```
+
+之后 `addToolResult()` 把结果包装成 user message：
+
+```json
+{
+  "type": "tool_result",
+  "tool_use_id": "toolu_xxx",
+  "content": "src/query.ts\nsrc/Tool.ts\n..."
+}
+```
+
+`query.ts` 再把这个消息 normalize 后加入 `toolResults`，下一轮模型调用时就能看到搜索结果。
+
+## 4. 失败路径
+
+`GlobTool` 可能在多个阶段失败，每个失败都会变成 `is_error: true` 的 `tool_result`，保持 `tool_use` / `tool_result` 配对完整。
+
+| 失败点 | 例子 | 返回给模型 |
+|--------|------|------------|
+| 工具不存在 | 模型调用了不可用工具名 | `No such tool available` |
+| schema 校验失败 | `pattern` 缺失或类型错误 | `InputValidationError` |
+| 语义校验失败 | `path` 不存在或不是目录 | 工具自定义错误消息 |
+| 权限拒绝 | 无读取权限 | permission denial message |
+| 执行异常 | glob 内部抛错 | `Error calling tool (Glob): ...` |
+| 用户中断 | abort signal | cancellation tool_result |
+
+## 5. 与 BashTool 的关键差异
+
+`GlobTool` 是只读、并发安全工具；`BashTool` 的风险由具体输入决定。
+
+| 工具 | `isReadOnly` | `isConcurrencySafe` | 权限重点 |
+|------|--------------|---------------------|----------|
+| `GlobTool` | 恒为 `true` | 恒为 `true` | 文件读取权限 |
+| `BashTool` | 分析 command | 依赖 `isReadOnly(input)` | 命令权限、沙箱、危险命令分类 |
+
+这说明 cc-haha 的工具系统不是按工具名粗暴分类，而是鼓励工具根据输入内容返回安全属性。
+
+## 6. 待继续
+
+- `BashTool` 高风险路径：沙箱、权限规则、危险命令分类、后台任务
+- `ToolSearchTool` / `defer_loading`：动态工具加载如何降低 token 开销
+- `SyntheticOutputTool`：用 Tool-as-Schema 实现结构化输出
+- Fine-grained tool streaming：工具参数流式传输与提前执行
+
+## 7. 相关章节
+
+- [Agent Loop 设计](agent-loop.md)
+- [Context Management](context-management.md)
+- [cc-haha learning path §2](../raw/cc-haha-learning-path.md#2-tool-calling--function-calling)

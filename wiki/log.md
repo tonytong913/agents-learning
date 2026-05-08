@@ -122,3 +122,22 @@
 
 基于 cc-haha-learning-path.md 第一部分（Agent Loop 设计）创建学习笔记 wiki。
 采用 Karpathy LLM Wiki 模式：`raw/` 放源文件，`wiki/` 放笔记。
+
+---
+
+## [2026-05-08] query | Tool Calling / GlobTool 生命周期
+
+**范围**：`src/Tool.ts`, `src/tools.ts`, `src/utils/api.ts`, `src/query.ts`, `src/services/tools/toolOrchestration.ts`, `src/services/tools/toolExecution.ts`, `src/tools/GlobTool/GlobTool.ts`, `src/tools/GlobTool/prompt.ts`
+
+**讨论内容**：
+
+1. **Tool 接口分层**：模型可见 schema、执行入口、安全权限、UI/transcript、编排元信息共同组成工具契约
+2. **buildTool 默认值**：`isConcurrencySafe=false`、`isReadOnly=false` 的保守默认策略，避免新工具误并发或误按只读处理
+3. **API schema 转换**：`toolToAPISchema()` 将 `prompt()` 和 Zod `inputSchema` 转成 Anthropic tool schema
+4. **GlobTool 生命周期**：注册 → schema 暴露 → 模型 `tool_use` → `runTools()` 分批 → `runToolUse()` 校验/权限/执行 → `tool_result` 回到下一轮上下文
+5. **GlobTool 设计细节**：只读并发安全、路径语义校验、读取权限检查、结果相对路径化、截断提示
+6. **与 BashTool 的差异**：Glob 风险固定较低；Bash 根据具体 command 动态判断只读和并发安全
+
+**产出**：新增 `wiki/tool-calling.md`，更新 `wiki/index.md` 中 Tool Calling 状态为进行中
+
+**待继续**：BashTool 高风险路径、ToolSearchTool / defer_loading、SyntheticOutputTool 结构化输出
