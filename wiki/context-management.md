@@ -1,7 +1,7 @@
 # 上下文管理与 Token 优化
 
 > 状态：🟡 进行中 | 最后更新：2026-05-06
-> 相关源文件：`src/query.ts`, `src/services/compact/`
+> 相关源文件：`src/query.ts`, `src/constants/prompts.ts`, `src/context.ts`, `src/utils/queryContext.ts`, `src/utils/api.ts`, `src/services/api/claude.ts`, `src/services/compact/`
 
 ## 1. 架构概览：多层压缩策略
 
@@ -254,6 +254,7 @@ API 413 prompt_too_long
 
 ## 参考
 
+- [cc-haha-learning-path.md §4](../raw/cc-haha-learning-path.md#4-context-engineering--prompt-engineering)
 - [cc-haha-learning-path.md §5](../raw/cc-haha-learning-path.md#5-上下文窗口管理与-token-优化)
 - `src/services/compact/autoCompact.ts` — 自动压缩触发与阈值
 - `src/services/compact/compact.ts` — 传统 compact 核心
