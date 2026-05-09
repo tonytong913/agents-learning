@@ -1,7 +1,7 @@
 # MCP 协议集成
 
-> 状态：🟡 进行中 | 最后更新：2026-05-09
-> 相关源文件（cc-haha）：`src/services/mcp/client.ts`, `src/services/mcp/config.ts`, `src/services/mcp/auth.ts`, `src/services/mcp/useManageMCPConnections.ts`, `src/services/mcp/channelPermissions.ts`, `src/tools/MCPTool/MCPTool.ts`, `src/tools.ts`, `src/entrypoints/mcp.ts`, `src/vendor/computer-use-mcp/`
+> 状态：🟢 完成 | 最后更新：2026-05-09
+> 相关源文件（cc-haha）：`src/services/mcp/client.ts`, `src/services/mcp/config.ts`, `src/services/mcp/auth.ts`, `src/services/mcp/useManageMCPConnections.ts`, `src/services/mcp/channelPermissions.ts`, `src/tools/MCPTool/MCPTool.ts`, `src/tools/ListMcpResourcesTool/ListMcpResourcesTool.ts`, `src/tools/ReadMcpResourceTool/ReadMcpResourceTool.ts`, `src/tools.ts`, `src/entrypoints/mcp.ts`, `src/vendor/computer-use-mcp/`
 
 ## 1. Why：为什么需要 MCP
 
@@ -258,7 +258,74 @@ Computer Use 看起来是 MCP server，但不是普通外部 server。`connectTo
 
 这条链路体现 MCP 的双向性：cc-haha 既能消费外部工具，也能把自己的工具能力提供给其他 MCP client。
 
-## 12. Skills 与 MCP 的关系
+当前 server 侧还有一个明确边界：`mcp.ts` 只重新暴露 cc-haha 本地工具，没有把已经接入的外部 MCP tools 再转发出去。代码里保留了 TODO，但这个限制是合理的安全默认值，可以避免 MCP 工具递归转发后权限归属不清。
+
+## 12. How：MCP Tool 调用结果转换
+
+MCP server 返回的是协议层 `CallToolResult`，不是 cc-haha 内部工具结果。`src/services/mcp/client.ts` 的 `callMCPTool()` 负责调用 MCP SDK 的 `client.callTool()`，然后把结果归一化。
+
+调用链路：
+
+```text
+MCPTool.call()
+  -> ensureConnectedClient()
+  -> callMCPToolWithUrlElicitationRetry()
+  -> callMCPTool()
+  -> client.callTool({ name, arguments, _meta })
+  -> processMCPResult()
+  -> 本地 tool_result
+```
+
+`callMCPTool()` 做了几件关键工程处理：
+
+- 设置独立 timeout，避免 SDK transport 异常时工具调用永久挂起。
+- 把 MCP progress 转成 cc-haha 的 `mcp_progress`，供 UI 展示长任务进度。
+- 遇到 `isError` 时，从 MCP content 中提取错误文本并抛出本地错误。
+- 遇到 401 / session expired 时，清连接缓存并交给上层恢复或重连。
+- 成功时保留 `_meta` 和 `structuredContent`，通过 `mcpMeta` 附在本地工具结果上。
+
+结果转换的核心在 `transformResultContent()` / `processMCPResult()`。MCP content 可能包含 `text`、`image`、`audio`、`resource`、`resource_link`、`structuredContent` 等类型，cc-haha 不会无脑把它们都 stringify 到上下文：
+
+| MCP 内容 | cc-haha 处理 |
+| --- | --- |
+| `text` | 直接转 text block |
+| `image` | resize / downsample 后转模型可接收的 image block |
+| `audio` | 解码 base64，写入 tool-results 目录，给模型返回文件路径说明 |
+| `resource.text` | 加来源前缀后转 text block |
+| `resource.blob` | 图片按 image 处理，其他二进制写磁盘 |
+| `resource_link` | 转成可读的链接说明文本 |
+| `structuredContent` | 转 JSON 文本，并推断 compact schema |
+
+这个设计的重点是保护上下文窗口。外部 MCP server 可能返回 PDF、音频、图片或其他大 blob；如果直接把 base64 塞进消息，会快速消耗 token，甚至导致 `prompt_too_long`。所以 cc-haha 对二进制结果做落盘，只把可操作路径和必要说明交给模型。
+
+## 13. How：MCP Resource 读取链路
+
+MCP `resources` 是可寻址外部数据，不是函数调用。cc-haha 没有让模型直接发 `resources/read`，而是把 resource 能力包装成两个普通本地工具：
+
+| 工具 | 作用 | 设计属性 |
+| --- | --- | --- |
+| `ListMcpResourcesTool` | 列出已连接 MCP servers 暴露的 resources | 只读、并发安全、`shouldDefer=true` |
+| `ReadMcpResourceTool` | 按 `server + uri` 读取指定 resource | 只读、并发安全、`shouldDefer=true` |
+
+`ListMcpResourcesTool` 使用 `fetchResourcesForClient()`，后者调用 MCP `resources/list` 并把 server name 附到每个 resource 上。结果按 server name 做 LRU cache，`resources/list_changed` 或连接关闭时清 cache。
+
+`ReadMcpResourceTool` 的读取链路：
+
+```text
+模型调用 ReadMcpResourceTool({ server, uri })
+  -> 从 mcpClients 找 server
+  -> 校验 server connected 且支持 resources
+  -> ensureConnectedClient()
+  -> client.request({ method: "resources/read", params: { uri } })
+  -> ReadResourceResultSchema 校验
+  -> text 直接返回，blob 写入 tool-results 后返回路径说明
+```
+
+这让 MCP resource 进入原有 Tool Calling 编排：权限、并发、defer loading、tool_result 配对都沿用同一套机制。
+
+MCP Skills 也是基于 resources 的上层扩展。`skill://...` resource 可以分发远程 skill，因此 `resources/list_changed` 不只是资源列表变化，也可能意味着 skill discovery 索引需要失效重建。
+
+## 14. Skills 与 MCP 的关系
 
 Skills 和 MCP 不是严格替代关系。更准确地说：
 
@@ -278,11 +345,48 @@ Skill 规定线上 bug triage 的稳定流程
 
 没有 MCP，Skill 只能描述流程但拿不到外部数据；没有 Skill，MCP 只给一堆工具，模型可能乱查、漏查或顺序不稳定。
 
-## 13. 待继续
+## 15. 结论：MCP 在 cc-haha 中的位置
 
-- [ ] `callMCPTool()` 结果转换：文本、图片、binary、大输出持久化、`structuredContent` / `_meta`。
-- [ ] MCP resources 读取链路：`ListMcpResourcesTool` / `ReadMcpResourceTool` 与资源缓存。
-- [ ] MCP server 侧 `CallToolResult` 到外部 client 的错误和输出格式。
+cc-haha 把 MCP 放在“外部能力协议层”，但不让它绕过本地 Agent 架构。无论 MCP server 暴露的是 tool、resource 还是 prompt，最后都会被适配到 cc-haha 熟悉的内部形态：
+
+```text
+MCP tools
+  -> MCPTool
+  -> 本地 Tool 接口
+  -> runTools / StreamingToolExecutor
+  -> tool_result
+
+MCP resources
+  -> ListMcpResourcesTool / ReadMcpResourceTool
+  -> 本地 Tool 接口
+  -> tool_result
+
+MCP prompts
+  -> Command
+  -> slash command / prompt command
+```
+
+所以学习 MCP 这一章，重点不是记住某个 transport API，而是理解协议标准化和产品工程之间的适配层：配置治理、连接生命周期、权限认证、动态刷新、结果归一化、二进制输出保护，最后统一回到 Agent Loop。
+
+## 16. 面试速记
+
+**Q：MCP tool 和本地 tool 在 Agent Loop 里有什么区别？**
+
+MCP tool 在协议来源上是远程 server 暴露的能力，但进入 cc-haha 后会被 `MCPTool` 包装成本地 `Tool`。它仍然走同一套 schema 暴露、权限检查、并发编排、tool_result 回传。差异主要在适配层：schema 来自 MCP JSON Schema，调用通过 `tools/call`，结果需要从 MCP `CallToolResult` 转成本地消息块。
+
+**Q：为什么 MCP result 不能直接 stringify 进上下文？**
+
+因为 MCP content 可能包含图片、音频、resource blob 或大结构化数据。cc-haha 会按类型处理：文本直接进上下文，图片压缩成 image block，非图片二进制写入 tool-results 目录，只返回文件路径说明。这能避免 base64 污染上下文窗口。
+
+**Q：cc-haha 如何体现 MCP 的双向性？**
+
+Client 侧连接外部 MCP server，把远程 tools/resources/prompts 适配成本地 Tool 或 Command；Server 侧通过 `src/entrypoints/mcp.ts` 把自身本地工具暴露为 MCP `tools/list` 和 `tools/call`。两边都是协议对象和内部 Tool 抽象之间的转换。
+
+## 17. 待后续延伸
+
+- 在 §6 Streaming 中回看 MCP progress 如何进入实时 UI。
+- 在 §7 Memory / Skills 中继续展开 MCP Skills 与 skill discovery。
+- 在 §9 Permissions 中复盘 MCP permissions、channel permission relay 和 Computer Use 安全边界。
 
 ## 参考
 
@@ -293,6 +397,9 @@ Skill 规定线上 bug triage 的稳定流程
 - `src/services/mcp/useManageMCPConnections.ts` — 连接状态管理与 list_changed 刷新
 - `src/services/mcp/channelPermissions.ts` — channel permission relay
 - `src/tools/MCPTool/MCPTool.ts` — MCP 工具适配模板
+- `src/tools/ListMcpResourcesTool/ListMcpResourcesTool.ts` — MCP resources 列表工具
+- `src/tools/ReadMcpResourceTool/ReadMcpResourceTool.ts` — MCP resource 读取工具
+- `src/utils/mcpOutputStorage.ts` — MCP 二进制输出持久化
 - `src/tools.ts` — 内置工具与 MCP 工具合并
 - `src/entrypoints/mcp.ts` — cc-haha 作为 MCP server 暴露工具
 - `src/vendor/computer-use-mcp/` — Computer Use MCP server 与 GUI 操作能力

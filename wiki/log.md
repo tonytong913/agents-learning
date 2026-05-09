@@ -237,3 +237,23 @@
 **产出**：重构 `wiki/mcp-integration.md`，更新 `wiki/index.md` MCP 摘要。
 
 **待继续**：`callMCPTool()` 结果转换、MCP resource 读取链路、server 侧 `CallToolResult` 格式。
+
+---
+
+## [2026-05-09] query | MCP 结果转换、Resources 与 Server 侧收尾
+
+**范围**：`src/services/mcp/client.ts`, `src/tools/MCPTool/MCPTool.ts`, `src/tools/ListMcpResourcesTool/ListMcpResourcesTool.ts`, `src/tools/ReadMcpResourceTool/ReadMcpResourceTool.ts`, `src/utils/mcpOutputStorage.ts`, `src/entrypoints/mcp.ts`
+
+**讨论内容**：
+
+1. **MCP tool 调用闭环**：`MCPTool.call()` 通过 `callMCPToolWithUrlElicitationRetry()` / `callMCPTool()` 调远程 `tools/call`，再转成本地 tool result。
+2. **结果归一化**：`processMCPResult()` / `transformResultContent()` 按 text、image、audio、resource、resource_link、structuredContent 分流处理。
+3. **二进制输出保护**：音频和非图片 blob 不直接进入上下文，而是通过 `persistBinaryContent()` 写入 tool-results 目录，只返回路径说明。
+4. **Resource 读取链路**：`ListMcpResourcesTool` 封装 `resources/list`，`ReadMcpResourceTool` 封装 `resources/read`，两者都是只读、并发安全、deferred 工具。
+5. **Resources 与 MCP Skills**：`skill://...` resource 是 MCP Skills 的基础，`resources/list_changed` 需要触发 resource cache 与 skill search index 失效。
+6. **Server 侧暴露工具**：`src/entrypoints/mcp.ts` 通过 `ListToolsRequestSchema` 和 `CallToolRequestSchema` 把 cc-haha 本地工具暴露给外部 MCP client。
+7. **章节收束**：MCP 在 cc-haha 中是外部能力协议层，但所有能力最终都适配回本地 Tool / Command / Agent Loop。
+
+**产出**：补齐 `wiki/mcp-integration.md` §12-§17，更新状态为完成；同步 `wiki/index.md` MCP 状态为完成。
+
+**待继续**：进入 cc-haha 第 4 章 Context Engineering / Prompt Engineering。
