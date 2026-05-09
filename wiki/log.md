@@ -202,3 +202,18 @@
 **产出**：更新 `wiki/tool-calling.md` §8-§10，更新 `wiki/index.md` 中 Tool Calling 状态为完成
 
 **待继续**：进入 cc-haha 第 3 章 MCP 协议集成
+
+---
+
+## [2026-05-09] maintenance | cc-haha 学习路径与 wiki 目录对齐
+
+**范围**：`raw/cc-haha-learning-path.md`, `wiki/index.md`, `wiki/mcp-integration.md`, `README.md`
+
+**内容**：
+
+1. 明确 cc-haha 路线定位：1-12 章是源码精读主线，13-15 和附录是阶段规划、面试、Python 迁移与项目外补充能力。
+2. 按学习路线重排 `wiki/index.md` 的 cc-haha 目录，合并原先分散的 prompt/context、desktop/IM 等条目，新增多 Provider 与产品化通道的路线占位。
+3. 增量创建 `mcp-integration.md` 作为第 3 章起点，记录 MCP client/server 双向链路、`MCPTool` 适配和 Tool 池合并机制。
+4. 对照 cc-haha 源码校准 stale path：`adapters/common/chatqueue.ts` → `adapters/common/chat-queue.ts`。
+
+**待继续**：展开 MCP 配置加载、OAuth、list_changed 刷新、channel permissions 与 Computer Use MCP 特殊包装。

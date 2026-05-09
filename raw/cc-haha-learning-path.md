@@ -2,9 +2,20 @@
 
 > 基于 cchaha 项目
 > 目标读者：正在转型大模型/AI Agent 工程师的开发者
-> 学习方式：通过精读本项目（一个类 Claude Code 的 AI Agent CLI + Desktop 产品）的核心模块，掌握 2026 年 AI Agent 工程师 JOB MODEL 所要求的 14 大能力项
+> 学习方式：通过精读本项目（一个类 Claude Code 的 AI Agent CLI + Desktop 产品）的核心模块，掌握 AI Agent 工程师 JOB MODEL 所要求的核心能力：12 个 cc-haha 源码精读主题 + RAG、多模态、Python 生态、Fine-tuning 等补充能力
 > 预计周期：16-18 周（每周投入 10-15 小时）
-> 最后更新：2026-05-02 | 版本：v2.0
+> 最后更新：2026-05-09 | 版本：v2.1
+
+## 路线定位与 wiki 对齐
+
+本路线是 cc-haha 源码精读的能力地图，不是完整 API 文档。主线章节 1-12 对应 `wiki/index.md` 的 cc-haha 学习目录；章节 13-15 和附录用于阶段规划、面试速查、Python 迁移与项目外补充能力。
+
+对齐原则：
+
+- `wiki/index.md` 是当前学习状态源；本文件负责说明学习目标、源码入口和练习路径。
+- 1-12 章按源码能力项推进：Agent Loop、Tool Calling、MCP、Context/Prompt、Token 优化、Streaming、Memory、Multi-Agent、安全权限、LLMOps、多 Provider、产品化通道。
+- RAG、Fine-tuning、Python 生态和 Portfolio 属于补充能力，不要求在 cc-haha 源码中找到完整实现；进入这些主题时再单独建 wiki 页。
+- 正常学习笔记只更新 `wiki/`；只有当源码路径或路线目标发生漂移时，才更新本路线文档。
 
 ## 0. 项目全局架构
 
@@ -921,7 +932,7 @@ Planner(规划) → Simulator(模拟执行) → Evaluator(LLM-as-Judge 评分)
 | --- | --- | --- |
 | 1 | `adapters/README.md` | 适配层架构总览：Desktop → API → adapters → WS → session |
 | 2 | `adapters/common/ws-bridge.ts` | WebSocket Bridge：自动重连、心跳、FIFO 消息序列化 |
-| 3 | `adapters/common/chatqueue.ts` | 并发会话队列管理 |
+| 3 | `adapters/common/chat-queue.ts` | 并发会话队列管理 |
 | 4 | `adapters/common/message-dedup.ts` | 消息去重：防止 IM 平台重发导致重复处理 |
 | 5 | `adapters/common/attachment/` | 跨平台附件抽象：`AttachmentRef`、大小限制、`ImageBlockWatcher` |
 | 6 | `adapters/feishu/index.ts` | 飞书适配器：Lark WSClient → WsBridge → Claude 会话 |

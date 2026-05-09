@@ -16,20 +16,26 @@
 
 | 页面 | 状态 | 说明 |
 |------|------|------|
-| [agent-loop.md](agent-loop.md) | 🟢 完成 | Agent Loop 设计 — query()/queryLoop()、循环终止条件、工具执行三阶段、附件注入与记忆预取 |
-| [tool-calling.md](tool-calling.md) | 🟢 完成 | Tool Calling / Function Calling — Tool 接口、Zod / JSON Schema、runTools 编排、GlobTool 生命周期、BashTool 高风险路径、ToolSearch 渐进式加载、StructuredOutput、Fine-grained tool streaming |
-| prompt-engineering.md | ⬜ 待开始 | Prompt Engineering — System Prompt、Memory、自定义 Prompt |
-| [context-management.md](context-management.md) | 🟡 进行中 | Context Engineering / 上下文管理与 Token 优化 — System Prompt 注入、AutoCompact、MicroCompact、Session Memory Compact、附件注入 |
-| mcp-integration.md | ⬜ 待开始 | MCP 协议集成 — Client/Server、Tool 代理、连接管理 |
-| multi-agent.md | ⬜ 待开始 | Multi-Agent — AgentTool、Coordinator、forkedAgent |
-| permissions.md | ⬜ 待开始 | 权限系统 — Permission Mode、Tool Permission、hook 拦截 |
-| streaming.md | ⬜ 待开始 | Streaming — SSE、AsyncGenerator、StreamingToolExecutor |
-| observability.md | ⬜ 待开始 | 可观测性 — 成本追踪、日志、VCR 录制回放、Feature Flag |
-| desktop-app.md | ⬜ 待开始 | 桌面应用 — Tauri、WebSocket、Zustand 状态管理 |
-| hooks.md | ⬜ 待开始 | Hooks 系统 — 生命周期钩子、Stop Hooks、Post-Sampling Hooks |
-| memory-system.md | ⬜ 待开始 | Memory 系统 — SessionMemory、AutoMemory、Memory Prompt |
-| im-adapters.md | ⬜ 待开始 | IM 适配器 — 飞书、Telegram 集成 |
-| testing.md | ⬜ 待开始 | 测试策略 — VCR、单元测试、集成测试 |
+| [agent-loop.md](agent-loop.md) | 🟢 完成 | 路线 §1 Agent Loop 设计 — query()/queryLoop()、循环终止条件、工具执行三阶段、附件注入与记忆预取 |
+| [tool-calling.md](tool-calling.md) | 🟢 完成 | 路线 §2 Tool Calling / Function Calling — Tool 接口、Zod / JSON Schema、runTools 编排、GlobTool 生命周期、BashTool 高风险路径、ToolSearch 渐进式加载、StructuredOutput、Fine-grained tool streaming |
+| [mcp-integration.md](mcp-integration.md) | 🟡 进行中 | 路线 §3 MCP 协议集成 — Client/Server 双向角色、MCPTool 适配、Tool 池合并、连接与刷新机制 |
+| [context-management.md](context-management.md) | 🟡 进行中 | 路线 §4-§5 Context Engineering / 上下文窗口管理与 Token 优化 — System Prompt 注入、AutoCompact、MicroCompact、Session Memory Compact、附件注入 |
+| streaming.md | ⬜ 待开始 | 路线 §6 Streaming 与实时交互 — SSE、AsyncGenerator、StreamingToolExecutor、WebSocket 转发 |
+| memory-system.md | ⬜ 待开始 | 路线 §7 Memory 系统 — SessionMemory、extractMemories、memdir、非阻塞记忆预取 |
+| multi-agent.md | ⬜ 待开始 | 路线 §8 Multi-Agent — AgentTool、forkSubagent、Swarm、Coordinator |
+| permissions.md | ⬜ 待开始 | 路线 §9 安全、权限与沙箱 — Permission Mode、Bash 分类、YOLO、Worktree 隔离 |
+| observability.md | ⬜ 待开始 | 路线 §10 LLMOps / 可观测性 — 成本追踪、API 日志、VCR、Feature Flag、Agent 评估 |
+| model-routing.md | ⬜ 待开始 | 路线 §11 多 Provider 与模型路由 — Anthropic/OpenAI 协议转换、模型能力、fallback 降级 |
+| productization-channels.md | ⬜ 待开始 | 路线 §12 Agent 产品化：多通道接入 — Desktop、WebSocket、飞书/Telegram 适配、附件和流式消息映射 |
+
+### cc-haha 补充能力
+
+| 页面 | 状态 | 说明 |
+|------|------|------|
+| python-ecosystem.md | ⬜ 待开始 | 路线 §15 Python 生态映射 — 将 cc-haha TypeScript 概念迁移到 LangGraph、MCP Python SDK、LiteLLM、DeepEval 等 |
+| rag.md | ⬜ 待开始 | 附录 A RAG 补充学习路径 — 项目外能力，通过 MCP 接入 cc-haha 做综合实战 |
+| multimodal.md | ⬜ 待开始 | 附录 B 多模态处理基础 — 图像输入、Provider 格式转换、语音输入、Computer Use |
+| portfolio.md | ⬜ 待开始 | 附录 C-D Portfolio 与 Fine-tuning 储备 — 阶段项目、展示材料、LoRA/QLoRA 基础 |
 
 ### OpenClaw
 

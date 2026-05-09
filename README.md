@@ -27,18 +27,17 @@ agents-learning/
 
 | 领域 | 状态 |
 |------|------|
-| Agent Loop 设计 | 🟡 进行中 |
+| Agent Loop 设计 | 🟢 完成 |
+| Tool Calling / Function Calling | 🟢 完成 |
+| MCP 协议集成 | 🟡 进行中 |
 | 上下文管理与 Token 优化 | 🟡 进行中 |
-| Tool Calling / Function Calling | ⬜ 待开始 |
-| Prompt Engineering | ⬜ 待开始 |
-| MCP 协议集成 | ⬜ 待开始 |
-| Multi-Agent | ⬜ 待开始 |
-| 权限系统 | ⬜ 待开始 |
 | Streaming | ⬜ 待开始 |
-| 可观测性 | ⬜ 待开始 |
-| Hooks 系统 | ⬜ 待开始 |
 | Memory 系统 | ⬜ 待开始 |
-| 测试策略 | ⬜ 待开始 |
+| Multi-Agent | ⬜ 待开始 |
+| 权限系统与沙箱 | ⬜ 待开始 |
+| LLMOps / 可观测性 | ⬜ 待开始 |
+| 多 Provider 与模型路由 | ⬜ 待开始 |
+| Agent 产品化：多通道接入 | ⬜ 待开始 |
 | OpenClaw 架构概览 | ⬜ 待开始 |
 
 详见 [`wiki/index.md`](wiki/index.md)。
