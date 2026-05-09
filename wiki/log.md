@@ -181,3 +181,24 @@
 **产出**：更新 `wiki/tool-calling.md` §6（BashTool 高风险路径），更新 `wiki/index.md` Tool Calling 摘要
 
 **待继续**：SyntheticOutputTool 结构化输出、Fine-grained tool streaming
+
+---
+
+## [2026-05-09] query | SyntheticOutputTool 与 Fine-grained Tool Streaming
+
+**范围**：`src/tools/SyntheticOutputTool/SyntheticOutputTool.ts`, `src/utils/hooks/hookHelpers.ts`, `src/main.tsx`, `src/QueryEngine.ts`, `src/utils/api.ts`, `src/services/api/claude.ts`, `src/utils/messages.ts`, `src/query.ts`, `src/query/config.ts`, `src/services/tools/StreamingToolExecutor.ts`, `src/services/tools/toolExecution.ts`
+
+**讨论内容**：
+
+1. **Tool-as-Schema 结构化输出**：`StructuredOutput` 只在 non-interactive session 中根据 `jsonSchema` 动态创建，让模型通过 `tool_use.input` 提交最终 JSON
+2. **Ajv 双阶段校验**：创建工具时校验调用方 schema，执行工具时校验模型输出 input；失败转成 schema mismatch 错误
+3. **structured_output side channel**：普通 `tool_result` 只返回成功文本，真实 JSON 通过 `structured_output` attachment 被 `QueryEngine` 收集进最终 result
+4. **Stop hook 强制收口**：未调用 `StructuredOutput` 时通过 Stop hook 提醒模型补调用，并用最大重试次数避免无限循环
+5. **Fine-grained tool streaming**：`toolToAPISchema()` 在一方 Anthropic API 且 gate/env 允许时添加 `eager_input_streaming`
+6. **raw stream 累计 input_json_delta**：`claude.ts` 自己拼接 tool input 字符串，等 `content_block_stop` 后再 parse，避免 SDK partial parse 的 O(n²) 成本
+7. **StreamingToolExecutor 提前执行**：完整 `tool_use` block 一到达就按并发安全策略入队执行，最后用 `getRemainingResults()` 兜底收齐结果
+8. **fallback / abort 兜底**：streaming fallback 时 discard 旧 executor，用户中断或错误级联时生成 synthetic `tool_result` 保持配对完整
+
+**产出**：更新 `wiki/tool-calling.md` §8-§10，更新 `wiki/index.md` 中 Tool Calling 状态为完成
+
+**待继续**：进入 cc-haha 第 3 章 MCP 协议集成

@@ -1,7 +1,7 @@
 # Tool Calling / Function Calling
 
-> 状态：🟡 进行中 | 最后更新：2026-05-09
-> 相关源文件（cc-haha）：`src/Tool.ts`, `src/tools.ts`, `src/utils/api.ts`, `src/query.ts`, `src/services/api/claude.ts`, `src/services/tools/toolOrchestration.ts`, `src/services/tools/toolExecution.ts`, `src/tools/GlobTool/GlobTool.ts`, `src/tools/GlobTool/prompt.ts`, `src/tools/BashTool/BashTool.tsx`, `src/tools/BashTool/bashPermissions.ts`, `src/tools/BashTool/readOnlyValidation.ts`, `src/tools/BashTool/pathValidation.ts`, `src/tools/BashTool/shouldUseSandbox.ts`, `src/tools/BashTool/sedValidation.ts`, `src/tools/BashTool/sedEditParser.ts`, `src/tools/BashTool/commandSemantics.ts`, `src/tools/BashTool/destructiveCommandWarning.ts`, `src/tools/ToolSearchTool/ToolSearchTool.ts`, `src/tools/ToolSearchTool/prompt.ts`, `src/utils/toolSearch.ts`, `src/utils/attachments.ts`
+> 状态：🟢 完成 | 最后更新：2026-05-09
+> 相关源文件（cc-haha）：`src/Tool.ts`, `src/tools.ts`, `src/utils/api.ts`, `src/query.ts`, `src/query/config.ts`, `src/services/api/claude.ts`, `src/services/tools/toolOrchestration.ts`, `src/services/tools/toolExecution.ts`, `src/services/tools/StreamingToolExecutor.ts`, `src/tools/GlobTool/GlobTool.ts`, `src/tools/GlobTool/prompt.ts`, `src/tools/BashTool/BashTool.tsx`, `src/tools/BashTool/bashPermissions.ts`, `src/tools/BashTool/readOnlyValidation.ts`, `src/tools/BashTool/pathValidation.ts`, `src/tools/BashTool/shouldUseSandbox.ts`, `src/tools/BashTool/sedValidation.ts`, `src/tools/BashTool/sedEditParser.ts`, `src/tools/BashTool/commandSemantics.ts`, `src/tools/BashTool/destructiveCommandWarning.ts`, `src/tools/ToolSearchTool/ToolSearchTool.ts`, `src/tools/ToolSearchTool/prompt.ts`, `src/tools/SyntheticOutputTool/SyntheticOutputTool.ts`, `src/utils/toolSearch.ts`, `src/utils/attachments.ts`, `src/utils/messages.ts`, `src/utils/hooks/hookHelpers.ts`
 
 ## 1. 核心链路
 
@@ -692,12 +692,257 @@ boundaryMarker.compactMetadata.preCompactDiscoveredTools = [...]
 
 `extractDiscoveredToolNames()` 后续会从 compact boundary 读回这些工具名，避免 compact 后重复丢 schema。
 
-## 8. 待继续
+## 8. SyntheticOutputTool 结构化输出
 
-- `SyntheticOutputTool`：用 Tool-as-Schema 实现结构化输出
-- Fine-grained tool streaming：工具参数流式传输与提前执行
+`SyntheticOutputTool` 不是外部动作工具，而是一个内部输出协议：让模型通过一次 `tool_use` 提交最终 JSON。它把“结构化输出”复用到 Tool Calling 链路里，而不是另做一套 response parser。
 
-## 9. 相关章节
+```text
+CLI / SDK 传入 jsonSchema
+  -> createSyntheticOutputTool(jsonSchema)
+  -> 工具列表追加 StructuredOutput
+  -> toolToAPISchema() 直接使用 inputJSONSchema
+  -> 模型调用 StructuredOutput(input = 最终 JSON)
+  -> Ajv 校验 input 是否符合 schema
+  -> toolExecution 生成 structured_output attachment
+  -> QueryEngine 在最终 result.structured_output 返回给调用方
+```
+
+### 8.1 只在非交互场景启用
+
+`isSyntheticOutputToolEnabled()` 只检查 `isNonInteractiveSession`。这说明 `StructuredOutput` 主要服务 SDK / CLI 自动化调用，而不是普通 REPL 交互。
+
+`main.tsx` 在解析 `options.jsonSchema` 后调用 `createSyntheticOutputTool(jsonSchema)`。创建成功后，它把工具追加到 `getTools()` 过滤之后的工具列表：
+
+```text
+getTools(toolPermissionContext)
+  -> 过滤普通用户可控工具
+  -> append syntheticOutputResult.tool
+```
+
+注释里强调：这个工具是 structured output 的实现细节，不应该被普通 `--tools` / allowlist 流程当成用户工具控制。
+
+### 8.2 Schema 来自调用方，而不是固定 Zod
+
+普通工具大多用 `inputSchema` 的 Zod schema，再通过 `zodToJsonSchema()` 转成 API schema。`SyntheticOutputTool` 不一样：每个 workflow 可以传入不同 JSON Schema。
+
+`createSyntheticOutputTool()` 会先用 Ajv 校验 schema 本身：
+
+```text
+new Ajv({ allErrors: true })
+  -> validateSchema(jsonSchema)
+  -> compile(jsonSchema)
+```
+
+如果 schema 非法，返回 `{ error }`，不会注册工具。
+
+如果 schema 合法，它返回一个覆盖了 `inputJSONSchema` 和 `call()` 的工具实例。`call(input)` 再用 compile 后的 Ajv validator 校验模型提交的 `input`：
+
+| 阶段 | 校验对象 | 失败行为 |
+|------|----------|----------|
+| 创建工具时 | 调用方传入的 JSON Schema | 返回 `{ error }`，不添加工具 |
+| 模型调用时 | `StructuredOutput` 的 input | 抛出 schema mismatch error |
+
+这里还有一个 `WeakMap<object, CreateResult>` identity cache。原因是 workflow scripts 可能反复用同一个 schema object 调用 agent；缓存可以避免每次都新建 Ajv、校验 schema、compile validator。
+
+### 8.3 tool_result 与 structured_output 是两条路径
+
+`SyntheticOutputTool.call()` 成功时返回：
+
+```typescript
+{
+  data: 'Structured output provided successfully',
+  structured_output: input,
+}
+```
+
+`data` 会进入普通 `tool_result`，用于满足 API 的 `tool_use` / `tool_result` 配对；真正的结构化 JSON 则走 `structured_output` side channel。
+
+`toolExecution.ts` 看到 result 中有 `structured_output` 后，会额外创建 attachment：
+
+```typescript
+createAttachmentMessage({
+  type: 'structured_output',
+  data: result.structured_output,
+})
+```
+
+`QueryEngine` 捕获这个 attachment，把 `data` 存成 `structuredOutputFromTool`，最终在 SDK / CLI result 中返回：
+
+```typescript
+{
+  result: textResult,
+  structured_output: structuredOutputFromTool,
+}
+```
+
+因此模型上下文里看到的是简短成功消息，调用方拿到的是原始 JSON 对象。
+
+### 8.4 Stop hook 负责强制收口
+
+结构化输出最大的问题不是 schema 校验，而是模型可能忘记调用 `StructuredOutput`。`QueryEngine` 在检测到 `jsonSchema && hasStructuredOutputTool` 后注册 Stop hook：
+
+```text
+Stop 时检查 hasSuccessfulToolCall(messages, "StructuredOutput")
+  -> 没有调用则提示模型必须调用 StructuredOutput
+```
+
+同时，`QueryEngine` 会统计本次 query 里 `StructuredOutput` 的调用次数。超过 `MAX_STRUCTURED_OUTPUT_RETRIES`（默认 5）后，返回 `error_max_structured_output_retries`，避免无限自我修正。
+
+### 8.5 和 OpenAI JSON mode 的区别
+
+`StructuredOutput` 是 Tool-as-Schema：
+
+| 方案 | 约束位置 | 优点 | 代价 |
+|------|----------|------|------|
+| JSON mode / response_format | 模型最终文本输出 | 输出面简单，调用方直接拿 JSON | 容易和工具调用、多轮动作分离 |
+| Tool-as-Schema | `tool_use.input_schema` | 复用工具 schema、执行、校验、重试和 transcript 机制 | 多一次内部工具调用，需要处理 tool_result 配对 |
+
+cc-haha 选择 Tool-as-Schema，是因为它已经有成熟的 Tool Runtime：schema 暴露、工具执行、错误转换、hook enforcement、transcript 记录都能复用。
+
+## 9. Fine-grained Tool Streaming
+
+Fine-grained tool streaming 解决的是“大工具参数生成期间看起来卡住”的问题；`StreamingToolExecutor` 解决的是“模型输出完才开始执行工具”的问题。二者职责不同，但可以叠加。
+
+```text
+Fine-grained tool streaming
+  -> API 更早发送 input_json_delta
+
+StreamingToolExecutor
+  -> 本地在 tool_use block 完成后尽早执行工具
+```
+
+### 9.1 eager_input_streaming 是 API schema 字段
+
+`toolToAPISchema()` 在满足条件时给每个 tool schema 加：
+
+```typescript
+eager_input_streaming: true
+```
+
+启用条件很保守：
+
+| 条件 | 原因 |
+|------|------|
+| `getAPIProvider() === 'firstParty'` | 第三方 provider 未必支持该 beta 字段 |
+| `isFirstPartyAnthropicBaseUrl()` | LiteLLM 等代理可能返回 400 |
+| `tengu_fgts` 或 `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING` | 灰度 / 环境变量控制 |
+
+注释说明，没有 FGTS 时 API 可能先缓冲完整工具 input，再发送 `input_json_delta`。当工具参数很大，例如 Write/Edit 的大文件内容，用户会看到长时间无输出。
+
+### 9.2 cc-haha 自己累计 input_json_delta
+
+`claude.ts` 没有使用 SDK 的 `BetaMessageStream`，而是直接读 raw stream。原因是 SDK 会对每个 `input_json_delta` 做 partial parse，大输入下可能变成 O(n²)。
+
+cc-haha 自己维护 `contentBlocks`：
+
+```text
+content_block_start(tool_use)
+  -> contentBlocks[index] = { ...content_block, input: "" }
+
+content_block_delta(input_json_delta)
+  -> contentBlock.input += delta.partial_json
+
+content_block_stop
+  -> normalizeContentFromAPI([contentBlock], tools, agentId)
+  -> yield assistant message
+```
+
+注意：streaming 期间 `input` 是字符串。只有 block stop 后，`normalizeContentFromAPI()` 才会 `safeParseJSON()`，并调用 `normalizeToolInput()` 做工具特定修正。
+
+如果 JSON parse 失败，系统记录 `tengu_tool_input_json_parse_fail`，然后退回 `{}`。这样下游 Zod 校验会产生正常的输入错误，而不是让半截 JSON 破坏整个消息流。
+
+### 9.3 StreamingToolExecutor 提前执行完整 tool_use
+
+`query.ts` 通过 `config.gates.streamingToolExecution` 决定是否创建 `StreamingToolExecutor`。开关来自 Statsig gate `tengu_streaming_tool_execution2`。
+
+当 `claude.ts` yield 出 assistant message 后，`query.ts` 立即提取其中的 `tool_use` block：
+
+```text
+assistant message
+  -> msgToolUseBlocks
+  -> streamingToolExecutor.addTool(toolBlock, message)
+  -> streamingToolExecutor.getCompletedResults()
+```
+
+这意味着不必等整轮模型输出结束。只要一个 tool_use block 已经完整闭合，本地就能开始跑工具。
+
+`StreamingToolExecutor.addTool()` 会：
+
+```text
+findToolByName(block.name)
+  -> tool.inputSchema.safeParse(block.input)
+  -> tool.isConcurrencySafe(parsedInput.data)
+  -> 入队并尝试 processQueue()
+```
+
+并发规则和普通 `runTools()` 保持一致：并发安全工具可以一起跑；非并发安全工具独占执行。
+
+### 9.4 结果仍保持 API 配对和顺序约束
+
+提前执行不能破坏 Anthropic API 对 `tool_use` / `tool_result` 的配对要求。`StreamingToolExecutor` 内部维护每个工具的状态：
+
+```text
+queued -> executing -> completed -> yielded
+```
+
+它会把进度消息立即 yield，但普通结果按顺序缓冲。遇到正在执行的非并发安全工具时，`getCompletedResults()` 会停止向后吐结果，避免后续工具结果越过独占工具。
+
+在模型流结束后，`query.ts` 统一调用：
+
+```text
+streamingToolExecutor.getRemainingResults()
+```
+
+如果没有 streaming executor，则退回传统：
+
+```text
+runTools(toolUseBlocks, assistantMessages, canUseTool, toolUseContext)
+```
+
+### 9.5 abort、fallback 与错误级联
+
+StreamingToolExecutor 还承担提前执行带来的兜底：
+
+| 场景 | 处理 |
+|------|------|
+| 用户中断 | 为未完成工具生成 synthetic `tool_result`，避免 tool_use 无配对 |
+| streaming fallback | `discard()` 当前 executor，丢弃旧 attempt 的 pending result |
+| Bash 工具错误 | 触发 sibling abort，取消同批 Bash 依赖链中的后续工具 |
+| 普通工具错误 | 不自动取消其他独立工具 |
+
+这就是为什么 `query.ts` 在流式 fallback 或模型 fallback 时会重建 `StreamingToolExecutor`：旧 attempt 的 `tool_use_id` 不能和新响应混用，否则会产生孤立 `tool_result`。
+
+### 9.6 两个 streaming 的配合关系
+
+一次大工具调用可以这样发生：
+
+```text
+API 开始输出 tool_use
+  -> input_json_delta 一段段到达
+  -> claude.ts 只追加字符串，不反复 parse
+  -> content_block_stop 后 parse 成完整 input object
+  -> query.ts 收到 assistant message
+  -> StreamingToolExecutor.addTool()
+  -> runToolUse() 开始执行
+```
+
+FGTS 提前的是“参数可见性”，StreamingToolExecutor 提前的是“本地执行时机”。如果只有 FGTS，没有 executor，仍要等模型整轮结束再执行工具；如果只有 executor，没有 FGTS，大参数仍可能在 API 侧缓冲很久。
+
+## 10. 章节总结
+
+cc-haha 的 Tool Calling 体系可以分成五层：
+
+| 层次 | 代表机制 |
+|------|----------|
+| 工具契约 | `Tool` 接口、`buildTool()`、Zod / JSON Schema |
+| 模型协议 | `toolToAPISchema()`、`tool_use`、`tool_result` |
+| 执行编排 | `runTools()`、`runToolUse()`、`StreamingToolExecutor` |
+| 安全边界 | `checkPermissions()`、Bash AST / sandbox / path constraints |
+| Token 优化 | `ToolSearchTool` defer loading、FGTS、compact 后 discovered tools 保存 |
+
+这个设计的核心不是“支持函数调用”，而是把函数调用变成可校验、可审批、可并发、可压缩、可恢复的 Agent action runtime。
+
+## 11. 相关章节
 
 - [Agent Loop 设计](agent-loop.md)
 - [Context Management](context-management.md)
