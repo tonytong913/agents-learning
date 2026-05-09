@@ -50,4 +50,14 @@ Pull requests should include a short summary, changed pages, related learning to
 
 ## Agent-Specific Instructions
 
-For learning sessions, follow the workflow in `CLAUDE.md`: read relevant `raw/` sections, update or create `wiki/<topic>.md`, refresh `wiki/index.md`, then append an entry to `wiki/log.md`.
+## Session Bootstrap
+
+Before starting any learning session or wiki update, read `memory/MEMORY.md` and the memory files it references. Treat those files as active project preferences for the current session.
+
+In particular:
+
+- Learning is discussion-first. Read and discuss the relevant material before writing notes.
+- Do not update `wiki/`, `wiki/index.md`, or `wiki/log.md` until the user explicitly confirms that the discussed material should be written up.
+- When learning one target project, focus on that project only. Do not introduce cross-project comparisons unless the user explicitly asks for comparison.
+
+For learning sessions, follow the workflow in `CLAUDE.md`, with the memory preferences above taking precedence over the default note-writing flow.
