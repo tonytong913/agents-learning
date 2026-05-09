@@ -17,7 +17,7 @@
 | 页面 | 状态 | 说明 |
 |------|------|------|
 | [agent-loop.md](agent-loop.md) | 🟢 完成 | Agent Loop 设计 — query()/queryLoop()、循环终止条件、工具执行三阶段、附件注入与记忆预取 |
-| [tool-calling.md](tool-calling.md) | 🟡 进行中 | Tool Calling / Function Calling — Tool 接口、Zod Schema、API schema 转换、runTools 编排、GlobTool 生命周期、ToolSearch 渐进式加载 |
+| [tool-calling.md](tool-calling.md) | 🟡 进行中 | Tool Calling / Function Calling — Tool 接口、Zod Schema、API schema 转换、runTools 编排、GlobTool 生命周期、BashTool 高风险路径、ToolSearch 渐进式加载 |
 | prompt-engineering.md | ⬜ 待开始 | Prompt Engineering — System Prompt、Memory、自定义 Prompt |
 | [context-management.md](context-management.md) | 🟡 进行中 | Context Engineering / 上下文管理与 Token 优化 — System Prompt 注入、AutoCompact、MicroCompact、Session Memory Compact、附件注入 |
 | mcp-integration.md | ⬜ 待开始 | MCP 协议集成 — Client/Server、Tool 代理、连接管理 |
