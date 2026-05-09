@@ -217,3 +217,23 @@
 4. 对照 cc-haha 源码校准 stale path：`adapters/common/chatqueue.ts` → `adapters/common/chat-queue.ts`。
 
 **待继续**：展开 MCP 配置加载、OAuth、list_changed 刷新、channel permissions 与 Computer Use MCP 特殊包装。
+
+---
+
+## [2026-05-09] query | MCP 协议集成 why/what/how 重构
+
+**范围**：`src/services/mcp/config.ts`, `src/services/mcp/client.ts`, `src/services/mcp/auth.ts`, `src/services/mcp/useManageMCPConnections.ts`, `src/services/mcp/channelPermissions.ts`, `src/tools/MCPTool/MCPTool.ts`, `src/entrypoints/mcp.ts`, `src/vendor/computer-use-mcp/`, `src/utils/computerUse/wrapper.tsx`
+
+**讨论内容**：
+
+1. **why/what/how 结构**：MCP 解决外部能力接入碎片化；核心问题拆成配置治理、连接治理、工具适配、安全认证和动态刷新。
+2. **配置合并与去重**：enterprise / user / project / local / plugin / claude.ai connector 多 scope 合并；stdio command signature 与 URL signature 是内容级去重指纹，不是协议层唯一 ID。
+3. **tools / resources / prompts**：tools 是可调用动作，resources 是可寻址外部数据，prompts 是可复用模板/命令。
+4. **MCP Skills**：通过 `skill://` resources 分发远程 skill；`resources/list_changed` 需要清 MCP skill cache 与 skill search index。
+5. **OAuth 与认证差异**：`http` / `sse` 主要走 `ClaudeAuthProvider`；metadata discovery、PKCE callback、本地 callback server、secure storage、refresh token、step-up auth、401/403 分工；其他 server 类型分别用 env、headers、IDE token、Claude.ai proxy 或本地权限控制。
+6. **动态刷新与权限**：`tools/list_changed`、`prompts/list_changed`、`resources/list_changed` 局部刷新 AppState；channel permission relay 依赖 allowlist 和 experimental capability。
+7. **Computer Use MCP**：走 in-process transport 和 `.call()` override，安全边界在 app allowlist、截图过滤、frontmost gate、session lock 和 Esc 中断。
+
+**产出**：重构 `wiki/mcp-integration.md`，更新 `wiki/index.md` MCP 摘要。
+
+**待继续**：`callMCPTool()` 结果转换、MCP resource 读取链路、server 侧 `CallToolResult` 格式。

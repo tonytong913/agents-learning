@@ -1,1 +1,2 @@
 - [feedback-learning-style](feedback-learning-style.md) — Learning must be dialog-based: discuss first, write notes after. Don't pre-synthesize.
+- [feedback_wiki_write_structure](feedback_wiki_write_structure.md) — After discussion and confirmation, write wiki notes using why / what / how before building the wiki page.

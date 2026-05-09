@@ -18,7 +18,7 @@
 |------|------|------|
 | [agent-loop.md](agent-loop.md) | 🟢 完成 | 路线 §1 Agent Loop 设计 — query()/queryLoop()、循环终止条件、工具执行三阶段、附件注入与记忆预取 |
 | [tool-calling.md](tool-calling.md) | 🟢 完成 | 路线 §2 Tool Calling / Function Calling — Tool 接口、Zod / JSON Schema、runTools 编排、GlobTool 生命周期、BashTool 高风险路径、ToolSearch 渐进式加载、StructuredOutput、Fine-grained tool streaming |
-| [mcp-integration.md](mcp-integration.md) | 🟡 进行中 | 路线 §3 MCP 协议集成 — Client/Server 双向角色、MCPTool 适配、Tool 池合并、连接与刷新机制 |
+| [mcp-integration.md](mcp-integration.md) | 🟡 进行中 | 路线 §3 MCP 协议集成 — why/what/how、配置合并与去重、Transport、MCPTool 适配、OAuth、list_changed、MCP Skills、Channel Permissions、Computer Use |
 | [context-management.md](context-management.md) | 🟡 进行中 | 路线 §4-§5 Context Engineering / 上下文窗口管理与 Token 优化 — System Prompt 注入、AutoCompact、MicroCompact、Session Memory Compact、附件注入 |
 | streaming.md | ⬜ 待开始 | 路线 §6 Streaming 与实时交互 — SSE、AsyncGenerator、StreamingToolExecutor、WebSocket 转发 |
 | memory-system.md | ⬜ 待开始 | 路线 §7 Memory 系统 — SessionMemory、extractMemories、memdir、非阻塞记忆预取 |
