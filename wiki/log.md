@@ -257,3 +257,26 @@
 **产出**：补齐 `wiki/mcp-integration.md` §12-§17，更新状态为完成；同步 `wiki/index.md` MCP 状态为完成。
 
 **待继续**：进入 cc-haha 第 4 章 Context Engineering / Prompt Engineering。
+
+---
+
+## [2026-05-13] query | Context Engineering：getUserContext、缓存与 InstructionsLoaded
+
+**范围**：`src/context.ts`, `src/utils/queryContext.ts`, `src/utils/api.ts`, `src/utils/claudemd.ts`, `src/utils/hooks.ts`, `src/utils/attachments.ts`, `src/services/compact/postCompactCleanup.ts`, `src/commands/clear/caches.ts`, `src/commands/memory/memory.tsx`
+
+**讨论内容**：
+
+1. **getUserContext 定位**：收集用户/项目 instruction 与当前日期，返回 `{ claudeMd?, currentDate }`，再由 `prependUserContext()` 包装成 meta user message。
+2. **fetchSystemPromptParts 分工**：`customSystemPrompt` 可跳过默认 system prompt 和 `getSystemContext()`，但不会跳过 `getUserContext()`。
+3. **Memory 文件来源**：`getMemoryFiles()` 处理 Managed/User/Project/Local、additional dirs、AutoMem/TeamMem、`@include`、rules 与 nested worktree 去重。
+4. **大文件策略**：普通 `CLAUDE.md` / rules 完整读取并注入，只通过 status / doctor 告警；AutoMem/TeamMem 的 `MEMORY.md` 入口有 200 行 / 25KB 截断。
+5. **两层 memoize**：`getUserContext` 缓存最终 user context，`getMemoryFiles` 缓存底层文件读取结果；只清内层不会让下一轮模型看到新的 `claudeMd`。
+6. **缓存清除边界**：`/clear`、`/compact`、post-compact cleanup 会清外层并重置 memory cache；`/memory`、settings sync、worktree 切换多用于内层正确性刷新。
+7. **InstructionsLoaded hook**：当 CLAUDE.md / rules 真正进入上下文时发出 audit / observability 事件，payload 包含 `file_path`、`memory_type`、`load_reason`、`globs`、`trigger_file_path`、`parent_file_path`。
+8. **使用者避坑**：修改 instruction 后若要当前会话立刻生效，应使用 `/clear`、`/compact` 或新会话；要求模型临时读取文件不等价于重建 hidden/meta `userContext`。
+
+**产出**：更新 `wiki/context-management.md` §10，补齐 Prompt / UserContext 构造、memory 文件加载、大文件策略、memoize 缓存、InstructionsLoaded hook 与使用者建议；更新 `wiki/index.md` Context Engineering 摘要。
+
+**待继续**：完成 Context Engineering 章节剩余的 system prompt 细节回看后，再决定是否进入 Streaming。
+
+---

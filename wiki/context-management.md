@@ -1,7 +1,7 @@
 # 上下文管理与 Token 优化
 
-> 状态：🟡 进行中 | 最后更新：2026-05-06
-> 相关源文件：`src/query.ts`, `src/constants/prompts.ts`, `src/context.ts`, `src/utils/queryContext.ts`, `src/utils/api.ts`, `src/services/api/claude.ts`, `src/services/compact/`
+> 状态：🟡 进行中 | 最后更新：2026-05-13
+> 相关源文件：`src/query.ts`, `src/constants/prompts.ts`, `src/context.ts`, `src/utils/queryContext.ts`, `src/utils/api.ts`, `src/utils/claudemd.ts`, `src/utils/hooks.ts`, `src/utils/attachments.ts`, `src/services/api/claude.ts`, `src/services/compact/`
 
 ## 1. 架构概览：多层压缩策略
 
@@ -238,18 +238,254 @@ API 413 prompt_too_long
 
 `notifyCompaction()` 在 compact 后重置缓存读取基线，防止缓存命中率下降被误报为 break。
 
-## 10. 相关概念
+## 10. Prompt / UserContext 构造链路
+
+第 4 章 Context Engineering 的重点不是只看 token 压缩，而是先理解 cc-haha 如何把系统规则、用户/项目记忆和运行态上下文拼进一次模型请求。
+
+### 10.1 三块上下文的职责
+
+位置：`src/utils/queryContext.ts`, `src/context.ts`, `src/utils/api.ts`, `src/query.ts`
+
+`fetchSystemPromptParts()` 并发收集三类信息：
+
+```typescript
+const [defaultSystemPrompt, userContext, systemContext] = await Promise.all([
+  customSystemPrompt !== undefined ? Promise.resolve([]) : getSystemPrompt(...),
+  getUserContext(),
+  customSystemPrompt !== undefined ? Promise.resolve({}) : getSystemContext(),
+])
+```
+
+职责分工：
+
+- `getSystemPrompt()`：cc-haha 内置系统规则，包含主系统提示词、工具说明、动态 boundary 等。
+- `getSystemContext()`：运行态系统上下文，例如会话开始时的 git status、cache breaker。
+- `getUserContext()`：用户/项目 instruction 和日期，最后作为 meta user message 注入。
+
+注意：`customSystemPrompt` 会跳过默认 system prompt 和 `getSystemContext()`，但不会跳过 `getUserContext()`。这说明 cc-haha 把用户/项目记忆视为工作环境的一部分，而不是默认 system prompt 的附属品。
+
+### 10.2 getUserContext 的核心流程
+
+位置：`src/context.ts`
+
+```text
+getUserContext()
+  → 判断是否禁用 CLAUDE.md 注入
+  → getMemoryFiles()
+  → filterInjectedMemoryFiles()
+  → getClaudeMds()
+  → setCachedClaudeMdContent()
+  → return { claudeMd?, currentDate }
+```
+
+关键逻辑：
+
+```typescript
+const shouldDisableClaudeMd =
+  isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS) ||
+  (isBareMode() && getAdditionalDirectoriesForClaudeMd().length === 0)
+
+const claudeMd = shouldDisableClaudeMd
+  ? null
+  : getClaudeMds(filterInjectedMemoryFiles(await getMemoryFiles()))
+
+return {
+  ...(claudeMd && { claudeMd }),
+  currentDate: `Today's date is ${getLocalISODate()}.`,
+}
+```
+
+禁用条件：
+
+- `CLAUDE_CODE_DISABLE_CLAUDE_MDS`：硬禁用 `claudeMd`。
+- bare mode 且没有显式 additional directories：跳过自动发现的 CLAUDE.md。
+
+即使禁用了 `claudeMd`，`currentDate` 仍然会返回。
+
+### 10.3 UserContext 不是 system prompt
+
+位置：`src/utils/api.ts`
+
+`getUserContext()` 只返回对象，真正的注入发生在 `prependUserContext()`：
+
+```typescript
+createUserMessage({
+  content: `<system-reminder>
+As you answer the user's questions, you can use the following context:
+${Object.entries(context).map(([key, value]) => `# ${key}\n${value}`).join('\n')}
+IMPORTANT: this context may or may not be relevant to your tasks...
+</system-reminder>`,
+  isMeta: true,
+})
+```
+
+所以 `claudeMd` / `currentDate` 不是直接塞进 `systemPrompt`，而是变成一条排在消息最前面的 meta user message。这样做保留了语义边界：
+
+- system prompt：产品内置行为规则。
+- user context：用户和项目给出的工作偏好、项目约束、当前日期。
+- 普通 user message：用户本轮真实请求。
+
+### 10.4 getMemoryFiles 的来源与顺序
+
+位置：`src/utils/claudemd.ts`
+
+`getMemoryFiles()` 负责收集 instruction 文件，`getUserContext()` 不直接做文件发现。
+
+主要来源：
+
+1. Managed memory 和 managed `.claude/rules/*.md`
+2. User memory 和 user `.claude/rules/*.md`
+3. 从原始 cwd 向上走到根目录，再自根向 cwd 处理 Project / Local 文件
+4. `CLAUDE.md`, `.claude/CLAUDE.md`, `.claude/rules/*.md`, `CLAUDE.local.md`
+5. additional directories 下的同类文件
+6. AutoMem / TeamMem 入口文件
+
+实现细节：
+
+- `processedPaths` 做去重。
+- symlink 会同时记录原路径和 resolved path。
+- nested worktree 会跳过主仓中重复的 checked-in Project 文件，但保留 `CLAUDE.local.md`。
+- `@include` 有递归深度上限：`MAX_INCLUDE_DEPTH = 5`。
+- 非文本扩展会跳过，避免把图片、PDF 等二进制注入 memory。
+
+### 10.5 大文件处理策略
+
+普通 `CLAUDE.md` / `.claude/rules/*.md` / `CLAUDE.local.md` 的策略是：完整读取、完整注入、只告警。
+
+```typescript
+const rawContent = await fs.readFile(filePath, { encoding: 'utf-8' })
+```
+
+大文件检测阈值：
+
+```typescript
+export const MAX_MEMORY_CHARACTER_COUNT = 40000
+```
+
+超过阈值后，`getLargeMemoryFiles()` 会被 status / doctor 调用，用于提示：
+
+```text
+Large CLAUDE.md will impact performance
+```
+
+但这不是截断。普通 instruction 文件即使超过 40k chars，也会进入 `claudeMd`。
+
+例外是 AutoMem / TeamMem 的 `MEMORY.md` 入口：
+
+```typescript
+if (type === 'AutoMem' || type === 'TeamMem') {
+  finalContent = truncateEntrypointContent(strippedContent).content
+}
+```
+
+入口文件有独立限制：
+
+- `MAX_ENTRYPOINT_LINES = 200`
+- `MAX_ENTRYPOINT_BYTES = 25_000`
+
+截断后会追加 warning，提示只有部分内容被加载。
+
+### 10.6 两层 memoize 缓存
+
+`getUserContext()` 和 `getMemoryFiles()` 是两层独立缓存：
+
+```text
+getUserContext cache
+  → 缓存最终 { claudeMd?, currentDate }
+
+getMemoryFiles cache
+  → 缓存已读取和解析的 MemoryFileInfo[]
+```
+
+`getUserContext()` 没有参数，lodash memoize 实际上只有一个缓存槽。第一次调用后，后续请求直接命中外层缓存，不会重新进入 `getMemoryFiles()`。
+
+因此只清内层不够：
+
+```typescript
+clearMemoryFileCaches()
+```
+
+只会执行：
+
+```typescript
+getMemoryFiles.cache?.clear?.()
+```
+
+如果外层 `getUserContext` 还在，下一轮仍然使用旧的 `claudeMd`。
+
+真正要让下一轮模型重新看到新的 CLAUDE.md，需要清外层：
+
+```typescript
+getUserContext.cache.clear?.()
+resetGetMemoryFilesCache(reason)
+```
+
+用户侧避坑：
+
+- 修改 `CLAUDE.md` / rules 后，如果希望当前会话后续立刻生效，用 `/clear`、`/compact` 或开新会话。
+- `/memory` 主要刷新 memory 文件列表和编辑入口，不等价于当前 `userContext` 已重建。
+- 临时要求模型读取新文件可以解决当下任务，但不等价于 hidden/meta `userContext` 重新注入。
+
+### 10.7 InstructionsLoaded hook
+
+位置：`src/utils/hooks.ts`, `src/utils/claudemd.ts`, `src/utils/attachments.ts`
+
+`InstructionsLoaded` 是 instruction 加载观测事件。当 `CLAUDE.md` 或 `.claude/rules/*.md` 真正进入上下文时，cc-haha 向 hook 系统发出事件。
+
+它是 fire-and-forget：
+
+```typescript
+void executeInstructionsLoadedHooks(...)
+```
+
+用途是 audit / observability，不阻塞主流程，也不改变 prompt。
+
+payload：
+
+```typescript
+{
+  hook_event_name: 'InstructionsLoaded',
+  file_path,
+  memory_type,      // User | Project | Local | Managed
+  load_reason,      // session_start | nested_traversal | path_glob_match | include | compact
+  globs,
+  trigger_file_path,
+  parent_file_path,
+}
+```
+
+触发路径：
+
+1. `getMemoryFiles()` eager load：会话开始加载顶层 instruction。
+2. compact 后 `resetGetMemoryFilesCache('compact')`：下一次重新加载时上报 `load_reason = compact`。
+3. `memoryFilesToAttachments()` lazy load：触碰更深目录或命中 `paths` frontmatter 规则时注入 nested memory attachment，并触发 hook。
+
+`AutoMem` / `TeamMem` 不触发该 hook，因为它们属于独立 memory system，不是 CLAUDE.md / rules 这类 instruction 文件。
+
+### 10.8 设计取舍
+
+`getUserContext()` 的定位不是 token-budget optimizer，而是“忠实加载用户/项目 instruction”。它对普通大文件不擅自裁剪，避免改变规则语义；性能问题通过 status / doctor 提醒用户整理。
+
+缓存设计则偏向会话稳定性：
+
+- 会话内 instruction 是快照，避免每轮读盘和 prompt 抖动。
+- `/clear`、`/compact`、新会话代表上下文重建边界。
+- `InstructionsLoaded` 让隐式加载的 instruction 对外可观测。
+
+## 11. 相关概念
 
 - **ForkedAgent**: compact 和 session_memory 都是用 ForkedAgent 执行的独立 Agent（`maxTurns=1`, `querySource='compact'`）
 - **RecompactionInfo**: 追踪连续 compact 的元信息（是否链式重压缩、距上次 compact 轮数等）
 - **promptCacheBreakDetection**: 监控缓存命中率下降，区分"合理 compact 导致"与"真正的缓存断裂"
 
-## 11. 待学习
+## 12. 待学习
 
 - [x] autoCompact 触发阈值与断路器
 - [x] microCompact 两种路径（cached + time-based）
 - [x] Session Memory Compact 替代方案
 - [x] 阶段 2-3 附件收集、memory prefetch、skill discovery
+- [x] getSystemContext / fetchSystemPromptParts / getUserContext 精读
+- [x] getUserContext 大文件处理、memoize 缓存与 InstructionsLoaded hook
 - [ ] OpenClaw 的 compaction.ts / context-engine/ 对照
 
 ## 参考
@@ -262,3 +498,9 @@ API 413 prompt_too_long
 - `src/services/compact/sessionMemoryCompact.ts` — 零 LLM 成本压缩
 - `src/services/compact/postCompactCleanup.ts` — 压缩后状态重置
 - `src/query.ts:1570-1630` — 阶段 2-3 附件注入
+- `src/context.ts` — `getSystemContext()` / `getUserContext()` 构造
+- `src/utils/queryContext.ts` — `fetchSystemPromptParts()` 并发组装
+- `src/utils/api.ts` — `prependUserContext()` 注入 meta user message
+- `src/utils/claudemd.ts` — `getMemoryFiles()` / `getClaudeMds()` / cache reset
+- `src/utils/hooks.ts` — `InstructionsLoaded` hook 定义与执行
+- `src/utils/attachments.ts` — nested memory attachment 与 lazy load hook
