@@ -280,3 +280,23 @@
 **待继续**：完成 Context Engineering 章节剩余的 system prompt 细节回看后，再决定是否进入 Streaming。
 
 ---
+
+## [2026-05-14] query | Context Engineering：getSystemPrompt、Prompt Cache 与最终 API 请求
+
+**范围**：`src/constants/prompts.ts`, `src/constants/systemPromptSections.ts`, `src/utils/queryContext.ts`, `src/utils/api.ts`, `src/query.ts`, `src/services/api/claude.ts`, `src/utils/modelCost.ts`
+
+**讨论内容**：
+
+1. **getSystemPrompt 分层**：返回 `string[]` 而非单个字符串；稳定产品规则放在 `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` 前，session/env/tool/MCP 等动态 section 放在边界后。
+2. **systemPromptSection 缓存**：普通 section 会话内缓存，直到 `/clear` 或 `/compact`；`DANGEROUS_uncachedSystemPromptSection` 用于确实会在 turn 间变化的内容，例如 MCP instructions。
+3. **Prompt Cache 两层含义**：cc-haha 本地 memoize / section cache 是工程层缓存；平台上的 `cache_read_input_tokens` / `cache_creation_input_tokens` 是 Anthropic API 服务端 Prompt Cache。
+4. **cache_control 桥接**：`splitSysPromptPrefix()` 根据 dynamic boundary 拆 system prompt block，`buildSystemPromptBlocks()` 给可缓存 block 加 `cache_control`。
+5. **最终请求组装**：`query.ts` 先压缩整理 `messagesForQuery`，再 `appendSystemContext()` 到 system prompt，`prependUserContext()` 到 messages，最后 `queryModel()` 组装 `system + messages + tools`。
+6. **API 三通道**：system prompt、messages、tools 分别发送；工具不塞进 system prompt，而是由 `toolToAPISchema()` 转成 API tool schema。
+7. **message 层缓存**：`addCacheBreakpoints()` 在 messages 层添加 cache marker，system 和 messages 都可能参与服务端 Prompt Cache。
+
+**产出**：重排并扩展 `wiki/context-management.md` §10，使 Prompt / UserContext 构造链路覆盖 `getSystemPrompt`、Prompt Cache、最终 API 请求组装；更新 `wiki/index.md` Context Engineering 摘要。
+
+**待继续**：快速精读 `AgentTool/prompt.ts` 与 `utils/effort.ts`，收口 Context Engineering 第 4 章剩余补充项。
+
+---

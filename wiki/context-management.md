@@ -264,7 +264,156 @@ const [defaultSystemPrompt, userContext, systemContext] = await Promise.all([
 
 注意：`customSystemPrompt` 会跳过默认 system prompt 和 `getSystemContext()`，但不会跳过 `getUserContext()`。这说明 cc-haha 把用户/项目记忆视为工作环境的一部分，而不是默认 system prompt 的附属品。
 
-### 10.2 getUserContext 的核心流程
+### 10.2 getSystemPrompt 的分层结构
+
+位置：`src/constants/prompts.ts`, `src/constants/systemPromptSections.ts`, `src/utils/api.ts`
+
+`getSystemPrompt()` 返回的不是单个大字符串，而是 `string[]`。正常路径会把系统提示词拆成稳定前缀和动态 section：
+
+```text
+getSystemPrompt()
+  → 收集 skill commands / output style / env info / enabled tools
+  → 构造 dynamicSections
+  → resolveSystemPromptSections()
+  → return [
+      static product rules,
+      SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+      dynamic sections,
+    ]
+```
+
+稳定前缀包含产品身份、工程行为规范、工具使用规范、风险动作规范、输出风格等：
+
+```typescript
+return [
+  getSimpleIntroSection(outputStyleConfig),
+  getSimpleSystemSection(),
+  getSimpleDoingTasksSection(),
+  getActionsSection(),
+  getUsingYourToolsSection(enabledTools),
+  getSimpleToneAndStyleSection(),
+  getOutputEfficiencySection(),
+  ...(shouldUseGlobalCacheScope() ? [SYSTEM_PROMPT_DYNAMIC_BOUNDARY] : []),
+  ...resolvedDynamicSections,
+].filter(s => s !== null)
+```
+
+动态 section 包括：
+
+- `session_guidance`：根据可用工具、skill、AgentTool 等生成的会话级指导。
+- `memory`：`loadMemoryPrompt()` 生成的 memdir memory prompt，不是 `CLAUDE.md`。
+- `env_info_simple`：cwd、git、platform、shell、模型信息等。
+- `language` / `output_style`：用户设置驱动的语言和输出风格。
+- `mcp_instructions`：MCP server 提供的 instructions。
+- `scratchpad` / `frc` / `summarize_tool_results` / token budget / brief 等 feature-gated section。
+
+普通动态 section 通过 `systemPromptSection()` 缓存到会话级 section cache，直到 `/clear` 或 `/compact` 清理；只有确实会在 turn 间变化的 section 才使用 `DANGEROUS_uncachedSystemPromptSection()`。典型例子是 `mcp_instructions`，因为 MCP servers 可能在会话中途连接或断开。
+
+### 10.3 Prompt Cache 的两层含义
+
+位置：`src/constants/prompts.ts`, `src/utils/api.ts`, `src/services/api/claude.ts`, `src/utils/modelCost.ts`
+
+cc-haha 里提到 Prompt Cache 时，要区分两层：
+
+```text
+工程层缓存
+  → memoize / systemPromptSection cache
+  → 少读文件、少重算、保持 prompt 字节稳定
+
+API 服务端 Prompt Cache
+  → 请求中带 cache_control
+  → Anthropic/Claude API 返回 cache_read_input_tokens / cache_creation_input_tokens
+```
+
+`SYSTEM_PROMPT_DYNAMIC_BOUNDARY` 是两层之间的桥。边界前的稳定系统提示词可以被切成 cacheable prefix，边界后的用户/会话动态内容不进入 global cache：
+
+```typescript
+export const SYSTEM_PROMPT_DYNAMIC_BOUNDARY =
+  '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__'
+```
+
+`splitSysPromptPrefix()` 会根据这个 marker 拆块：
+
+```text
+staticBlocks before boundary  → cacheScope: 'global'
+dynamicBlocks after boundary  → cacheScope: null
+```
+
+随后 `buildSystemPromptBlocks()` 把可缓存 block 转成 Anthropic API 的 text block：
+
+```typescript
+{
+  type: 'text',
+  text: block.text,
+  cache_control: getCacheControl(...)
+}
+```
+
+平台上看到的命中缓存指的是服务端 Prompt Cache：
+
+- `cache_read_input_tokens`：服务端从 prompt cache 读到的 input tokens。
+- `cache_creation_input_tokens`：本次写入 prompt cache 的 input tokens。
+
+它不是模型“记住了回答”，也不是 cc-haha 本地 memoize 命中，而是 API 服务端复用了完全相同的 prompt prefix。
+
+### 10.4 最终 API 请求组装
+
+位置：`src/query.ts`, `src/services/api/claude.ts`, `src/utils/api.ts`
+
+cc-haha 最终不是把全部上下文拼成一个大字符串，而是分别走 Anthropic API 的三条主通道：
+
+```text
+system   → system prompt blocks
+messages → userContext meta message + 对话历史
+tools    → tool schemas
+```
+
+在 `query.ts` 中，历史消息先经过 budget / snip / microcompact / context collapse / autocompact 等处理，得到真正准备发送的 `messagesForQuery`。随后：
+
+```typescript
+const fullSystemPrompt = asSystemPrompt(
+  appendSystemContext(systemPrompt, systemContext),
+)
+
+deps.callModel({
+  messages: prependUserContext(messagesForQuery, userContext),
+  systemPrompt: fullSystemPrompt,
+  tools: toolUseContext.options.tools,
+})
+```
+
+进入 `queryModel()` 后，API 层继续做三件事：
+
+1. `tools` 经 `toolToAPISchema()` 转成 API tool schemas。
+2. `messages` 经 `normalizeMessagesForAPI()`、`ensureToolResultPairing()`、`stripExcessMediaItems()` 等处理，再由 `addCacheBreakpoints()` 添加 message 层 cache marker。
+3. `systemPrompt` 加上 attribution header 和 CLI prefix，再由 `buildSystemPromptBlocks()` 切成带 `cache_control` 的 system text blocks。
+
+最终请求形态：
+
+```typescript
+{
+  model,
+  messages: addCacheBreakpoints(messagesForAPI, ...),
+  system,
+  tools: allTools,
+  tool_choice,
+  betas,
+  metadata,
+  max_tokens,
+  thinking,
+  context_management,
+  output_config,
+}
+```
+
+这里的设计边界是：
+
+- `systemContext` 追加进 system prompt 末尾，更像运行态系统事实。
+- `userContext` 前置进 messages，更像用户/项目意图。
+- `tools` 不写进 system prompt，而是作为 API tool schema 单独发送。
+- system 和 messages 都可能带 `cache_control`，用于服务端 Prompt Cache。
+
+### 10.5 getUserContext 的核心流程
 
 位置：`src/context.ts`
 
@@ -302,7 +451,7 @@ return {
 
 即使禁用了 `claudeMd`，`currentDate` 仍然会返回。
 
-### 10.3 UserContext 不是 system prompt
+### 10.6 UserContext 不是 system prompt
 
 位置：`src/utils/api.ts`
 
@@ -325,7 +474,7 @@ IMPORTANT: this context may or may not be relevant to your tasks...
 - user context：用户和项目给出的工作偏好、项目约束、当前日期。
 - 普通 user message：用户本轮真实请求。
 
-### 10.4 getMemoryFiles 的来源与顺序
+### 10.7 getMemoryFiles 的来源与顺序
 
 位置：`src/utils/claudemd.ts`
 
@@ -348,7 +497,7 @@ IMPORTANT: this context may or may not be relevant to your tasks...
 - `@include` 有递归深度上限：`MAX_INCLUDE_DEPTH = 5`。
 - 非文本扩展会跳过，避免把图片、PDF 等二进制注入 memory。
 
-### 10.5 大文件处理策略
+### 10.8 大文件处理策略
 
 普通 `CLAUDE.md` / `.claude/rules/*.md` / `CLAUDE.local.md` 的策略是：完整读取、完整注入、只告警。
 
@@ -385,7 +534,7 @@ if (type === 'AutoMem' || type === 'TeamMem') {
 
 截断后会追加 warning，提示只有部分内容被加载。
 
-### 10.6 两层 memoize 缓存
+### 10.9 两层 memoize 缓存
 
 `getUserContext()` 和 `getMemoryFiles()` 是两层独立缓存：
 
@@ -426,7 +575,7 @@ resetGetMemoryFilesCache(reason)
 - `/memory` 主要刷新 memory 文件列表和编辑入口，不等价于当前 `userContext` 已重建。
 - 临时要求模型读取新文件可以解决当下任务，但不等价于 hidden/meta `userContext` 重新注入。
 
-### 10.7 InstructionsLoaded hook
+### 10.10 InstructionsLoaded hook
 
 位置：`src/utils/hooks.ts`, `src/utils/claudemd.ts`, `src/utils/attachments.ts`
 
@@ -462,7 +611,7 @@ payload：
 
 `AutoMem` / `TeamMem` 不触发该 hook，因为它们属于独立 memory system，不是 CLAUDE.md / rules 这类 instruction 文件。
 
-### 10.8 设计取舍
+### 10.11 设计取舍
 
 `getUserContext()` 的定位不是 token-budget optimizer，而是“忠实加载用户/项目 instruction”。它对普通大文件不擅自裁剪，避免改变规则语义；性能问题通过 status / doctor 提醒用户整理。
 
@@ -486,6 +635,7 @@ payload：
 - [x] 阶段 2-3 附件收集、memory prefetch、skill discovery
 - [x] getSystemContext / fetchSystemPromptParts / getUserContext 精读
 - [x] getUserContext 大文件处理、memoize 缓存与 InstructionsLoaded hook
+- [x] getSystemPrompt 分层、Prompt Cache 与最终 API 请求组装
 - [ ] OpenClaw 的 compaction.ts / context-engine/ 对照
 
 ## 参考
@@ -499,8 +649,11 @@ payload：
 - `src/services/compact/postCompactCleanup.ts` — 压缩后状态重置
 - `src/query.ts:1570-1630` — 阶段 2-3 附件注入
 - `src/context.ts` — `getSystemContext()` / `getUserContext()` 构造
+- `src/constants/prompts.ts` — `getSystemPrompt()` / `SYSTEM_PROMPT_DYNAMIC_BOUNDARY`
+- `src/constants/systemPromptSections.ts` — system prompt section 缓存
 - `src/utils/queryContext.ts` — `fetchSystemPromptParts()` 并发组装
-- `src/utils/api.ts` — `prependUserContext()` 注入 meta user message
+- `src/utils/api.ts` — `prependUserContext()` / `appendSystemContext()` / `splitSysPromptPrefix()`
+- `src/services/api/claude.ts` — `queryModel()` / `buildSystemPromptBlocks()` / `addCacheBreakpoints()`
 - `src/utils/claudemd.ts` — `getMemoryFiles()` / `getClaudeMds()` / cache reset
 - `src/utils/hooks.ts` — `InstructionsLoaded` hook 定义与执行
 - `src/utils/attachments.ts` — nested memory attachment 与 lazy load hook
